@@ -6,8 +6,29 @@ import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import 'tldraw/tldraw.css';
 
-// --- MATH RENDERER ---
+// ---------------------------------------------------------
+// 1. ISOLATED WHITEBOARD ARCHITECTURE (The Core Fix)
+// ---------------------------------------------------------
+const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { ssr: false });
+
+// React.memo prevents the canvas from EVER re-rendering when sidebar state changes
+const Whiteboard = React.memo(({ onMount }: { onMount: (editor: any) => void }) => {
+  return (
+    // 'fixed' and '100vw' guarantees it physically cannot collapse to a black screen
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
+      <DynamicTldraw onMount={onMount} />
+    </div>
+  );
+});
+Whiteboard.displayName = 'Whiteboard';
+
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
+
+// ---------------------------------------------------------
+// 2. MATH RENDERER
+// ---------------------------------------------------------
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
   const cleanContent = content.replace(/\\\\/g, '\\');
@@ -52,21 +73,10 @@ const MathRenderer = ({ content }: { content: string }) => {
   );
 };
 
-// --- ISOLATED WHITEBOARD COMPONENT ---
-// Dynamically import the new separate component
-const IsolatedWhiteboard = dynamic(
-  () => import('@/components/Whiteboard'), // Adjust path if your components folder is elsewhere
-  { 
-    ssr: false, 
-    loading: () => <div className="absolute inset-0 bg-zinc-950 text-zinc-500 font-mono text-sm flex items-center justify-center animate-pulse">Loading Engine...</div>
-  }
-);
-// Memoize it so it NEVER re-renders unless forced
-const MemoizedWhiteboard = React.memo(IsolatedWhiteboard);
 
-const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
-
-// --- MAIN PAGE ---
+// ---------------------------------------------------------
+// 3. MAIN CLASSROOM PAGE
+// ---------------------------------------------------------
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
@@ -90,7 +100,7 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  const roomId = 'global-classroom-sync-v3'; 
+  const roomId = 'global-classroom-indestructible'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -112,6 +122,7 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
+  // SUPABASE REALTIME (Receiving Data)
   useEffect(() => {
     const channel = supabase.channel(`classroom:${roomId}`, { config: { broadcast: { self: false }, presence: { key: roomId } } });
     channelRef.current = channel;
@@ -119,14 +130,25 @@ export default function ClassroomPage() {
     channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
       if (!editorRef.current || !editorRef.current.store) return;
       editorRef.current.store.mergeRemoteChanges(() => {
-        try {
-          const { added, updated, removed } = payload;
-          const recordsToPut: any[] = [];
-          if (added) { Object.values(added).forEach((r: any) => { if (r && isShareable(r.id)) recordsToPut.push(r); }); }
-          if (updated) { Object.values(updated).forEach((rp: any) => { const newRecord = Array.isArray(rp) ? rp[1] : rp; if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); }); }
-          if (recordsToPut.length > 0) editorRef.current.store.put(recordsToPut);
-          if (removed) { const ids = Object.keys(removed).filter(id => isShareable(id)); if (ids.length > 0) editorRef.current.store.remove(ids); }
-        } catch (e) { }
+        const { added, updated, removed } = payload;
+        
+        // HEAVY ARMOR: Try/catch every single individual record to ensure corrupt data never crashes the canvas
+        if (added) {
+          Object.values(added).forEach((r: any) => {
+            if (r && isShareable(r.id)) { try { editorRef.current.store.put([r]); } catch(e) {} }
+          });
+        }
+        if (updated) {
+          Object.values(updated).forEach((rp: any) => {
+            const newRecord = Array.isArray(rp) ? rp[1] : rp;
+            if (newRecord && isShareable(newRecord.id)) { try { editorRef.current.store.put([newRecord]); } catch(e) {} }
+          });
+        }
+        if (removed) {
+          Object.keys(removed).forEach((id: string) => {
+            if (isShareable(id)) { try { editorRef.current.store.remove([id]); } catch(e) {} }
+          });
+        }
       });
     });
     
@@ -139,6 +161,8 @@ export default function ClassroomPage() {
     };
   }, [supabase, roomId]);
 
+  // SUPABASE REALTIME (Sending Data)
+  // useCallback guarantees this function NEVER changes, protecting the Memoized Whiteboard.
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
@@ -150,11 +174,13 @@ export default function ClassroomPage() {
           const filteredUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
           const filteredRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
           if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
+          
           channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
         } catch (e) {}
       }
     }, { scope: 'document' });
   }, []);
+
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -193,7 +219,10 @@ export default function ClassroomPage() {
 
   return (
     <div className="flex h-screen w-screen bg-zinc-950 text-white overflow-hidden">
-      <aside className="w-[340px] border-r border-zinc-800 bg-zinc-900 flex flex-col justify-between p-4 z-10 shrink-0 relative">
+      
+      {/* ---------------- SIDEBAR NAVIGATION ZONE ---------------- */}
+      {/* z-10 ensures it floats cleanly above the fixed canvas background */}
+      <aside className="w-[340px] border-r border-zinc-800 bg-zinc-900 flex flex-col justify-between p-4 z-10 shrink-0 relative shadow-2xl">
         <div className="space-y-4 flex-1 flex flex-col min-h-0">
           <div className="flex items-center justify-between shrink-0">
             <div>
@@ -221,13 +250,13 @@ export default function ClassroomPage() {
             </div>
           </div>
 
-          <div className="space-y-2 shrink-0 relative z-20">
+          <div className="space-y-2 shrink-0">
             <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={remoteVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" /><span className="text-xs text-zinc-600 font-mono z-10">Remote Video Stream</span></div>
             <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={localVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" />{!isVideoOn && <span className="text-xs text-zinc-600 font-mono z-10">Your Camera Off</span>}</div>
           </div>
         </div>
 
-        <div className="pt-4 border-t border-zinc-800 space-y-3 mt-4 shrink-0 relative z-20">
+        <div className="pt-4 border-t border-zinc-800 space-y-3 mt-4 shrink-0">
           <div className="flex items-center justify-between text-xs">
             <span className="text-zinc-400 flex items-center gap-1.5"><Wifi className={`w-3.5 h-3.5 ${isConnected ? 'text-emerald-500' : 'text-zinc-500'}`} />Signaling Server</span>
             <span className={`font-mono text-xs ${isConnected ? 'text-emerald-400' : 'text-amber-400'}`}>{isConnected ? 'ONLINE' : 'CONNECTING...'}</span>
@@ -240,9 +269,10 @@ export default function ClassroomPage() {
         </div>
       </aside>
 
-      <main className="flex-1 h-full relative bg-zinc-900 overflow-hidden isolate">
+      {/* ---------------- HUD LAYER ---------------- */}
+      <div className="flex-1 relative z-10 pointer-events-none">
         {activeQuestion && (
-          <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
+          <div className="absolute top-6 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300 pointer-events-auto">
             <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
             <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
             <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
@@ -256,9 +286,12 @@ export default function ClassroomPage() {
             </div>
           </div>
         )}
+      </div>
 
-        <MemoizedWhiteboard onMount={handleMount} />
-      </main>
+      {/* ---------------- CANVAS LAYER ---------------- */}
+      {/* Rendered ONCE. Never interrupted by React again. */}
+      <Whiteboard onMount={handleMount} />
+      
     </div>
   );
 }
