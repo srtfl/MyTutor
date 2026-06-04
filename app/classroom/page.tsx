@@ -6,36 +6,10 @@ import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 
-// Guaranteed CSS loading
-import 'tldraw/tldraw.css';
-import 'katex/dist/katex.min.css';
+// 🚨 THE CRITICAL FIX: Only sync drawings! Never sync camera, zoom, or pointer data.
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
 
-// 1. SILENT CRASH CATCHER (Error Boundary)
-// If Tldraw throws an error, this stops it from turning the screen black!
-class CanvasBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
-  constructor(props: any) { super(props); this.state = { hasError: false, error: null }; }
-  static getDerivedStateFromError(error: any) { return { hasError: true, error }; }
-  componentDidCatch(error: any, errorInfo: any) { console.error("Canvas crashed:", error, errorInfo); }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-950 p-10">
-          <div className="bg-rose-950/50 border border-rose-900 p-6 rounded-lg max-w-xl text-rose-200 font-mono text-sm">
-            <h2 className="text-lg font-bold text-rose-400 mb-2">Whiteboard Crash Prevented</h2>
-            <p>The canvas tried to disappear, but we caught the error:</p>
-            <div className="mt-4 p-3 bg-black/50 rounded overflow-x-auto text-rose-300">
-              {this.state.error?.message || 'Unknown internal error'}
-            </div>
-            <button onClick={() => window.location.reload()} className="mt-4 bg-rose-900 hover:bg-rose-800 text-white px-4 py-2 rounded">Reload Session</button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-// 2. Math Renderer
+// 1. Math Renderer
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
   const cleanContent = content.replace(/\\\\/g, '\\');
@@ -117,7 +91,7 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  const roomId = 'global-classroom-session-stable'; 
+  const roomId = 'global-classroom-sync-fixed'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -139,6 +113,7 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
+  // SUPABASE REALTIME (Receiving Data)
   useEffect(() => {
     const channel = supabase.channel(`classroom:${roomId}`, { config: { broadcast: { self: false }, presence: { key: roomId } } });
     channelRef.current = channel;
@@ -150,18 +125,27 @@ export default function ClassroomPage() {
           const { added, updated, removed } = payload;
           const recordsToPut: any[] = [];
           
-          // 3. STRICT DATA FILTER: Drops bad packets before they crash the canvas
-          if (added) { Object.values(added).forEach((r: any) => { if (r && typeof r === 'object' && r.id) recordsToPut.push(r); }); }
-          if (updated) { Object.values(updated).forEach((rp: any) => { if (rp && rp[1] && typeof rp[1] === 'object' && rp[1].id) recordsToPut.push(rp[1]); }); }
+          // STRICT FILTER: Only accept shapes. Reject all incoming camera/pointer data!
+          if (added) { 
+            Object.values(added).forEach((r: any) => { 
+              if (r && isShareable(r.id)) recordsToPut.push(r); 
+            }); 
+          }
+          if (updated) { 
+            Object.values(updated).forEach((rp: any) => { 
+              const newRecord = Array.isArray(rp) ? rp[1] : rp; // Handle both array and object formats
+              if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); 
+            }); 
+          }
           
           if (recordsToPut.length > 0) editorRef.current.store.put(recordsToPut);
           
           if (removed) {
-            const ids = Object.keys(removed).filter(id => typeof id === 'string' && id.trim() !== '');
+            const ids = Object.keys(removed).filter(id => isShareable(id));
             if (ids.length > 0) editorRef.current.store.remove(ids);
           }
         } catch (e) {
-          console.error("Safely caught a bad network packet that tried to crash the canvas:", e);
+          console.error("Safely dropped invalid network packet.");
         }
       });
     });
@@ -175,17 +159,33 @@ export default function ClassroomPage() {
     };
   }, [supabase, roomId]);
 
+  // SUPABASE REALTIME (Sending Data)
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
       if (update.source !== 'user') return; 
       if (channelRef.current) {
-        // 4. SAFE TRANSMISSION: Wraps outward network calls so they don't break the local UI
         try {
-          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: update.changes.added, updated: update.changes.updated, removed: update.changes.removed } });
-        } catch (e) {
-          console.warn("Network not ready to receive canvas update.");
-        }
+          // STRICT FILTER: Only send shapes. Never broadcast your mouse or camera!
+          const { added, updated, removed } = update.changes;
+          
+          const filteredAdded: any = {};
+          Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
+          
+          const filteredUpdated: any = {};
+          Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
+          
+          const filteredRemoved: any = {};
+          Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
+
+          // If you only moved your mouse, don't broadcast anything
+          if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
+
+          channelRef.current.send({ 
+            type: 'broadcast', event: 'canvas-update', 
+            payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } 
+          }).catch(() => {});
+        } catch (e) {}
       }
     }, { scope: 'document' });
   }, []);
@@ -338,11 +338,8 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        {/* SECURE CANVAS WRAPPER */}
         <div className="absolute inset-0" style={{ zIndex: 0 }}>
-          <CanvasBoundary>
              <Tldraw onMount={handleMount} />
-          </CanvasBoundary>
         </div>
       </main>
     </div>
