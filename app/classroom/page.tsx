@@ -5,11 +5,9 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
+import 'katex/dist/katex.min.css';
 
-// 🚨 THE CRITICAL FIX: Only sync drawings! Never sync camera, zoom, or pointer data.
-const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
-
-// 1. Math Renderer
+// --- MATH RENDERER ---
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
   const cleanContent = content.replace(/\\\\/g, '\\');
@@ -54,20 +52,21 @@ const MathRenderer = ({ content }: { content: string }) => {
   );
 };
 
-const LoadingWhiteboard = () => (
-  <div className="absolute inset-0 flex items-center justify-center text-zinc-500 font-mono text-sm animate-pulse bg-zinc-900">
-    Initializing Whiteboard Engine...
-  </div>
+// --- ISOLATED WHITEBOARD COMPONENT ---
+// Dynamically import the new separate component
+const IsolatedWhiteboard = dynamic(
+  () => import('@/components/Whiteboard'), // Adjust path if your components folder is elsewhere
+  { 
+    ssr: false, 
+    loading: () => <div className="absolute inset-0 bg-zinc-950 text-zinc-500 font-mono text-sm flex items-center justify-center animate-pulse">Loading Engine...</div>
+  }
 );
+// Memoize it so it NEVER re-renders unless forced
+const MemoizedWhiteboard = React.memo(IsolatedWhiteboard);
 
-const Tldraw = dynamic(
-  async () => {
-    const component = await import('tldraw');
-    return component.Tldraw;
-  },
-  { ssr: false, loading: LoadingWhiteboard }
-);
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
 
+// --- MAIN PAGE ---
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
@@ -91,7 +90,7 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  const roomId = 'global-classroom-sync-fixed'; 
+  const roomId = 'global-classroom-sync-v3'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -113,7 +112,6 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // SUPABASE REALTIME (Receiving Data)
   useEffect(() => {
     const channel = supabase.channel(`classroom:${roomId}`, { config: { broadcast: { self: false }, presence: { key: roomId } } });
     channelRef.current = channel;
@@ -124,29 +122,11 @@ export default function ClassroomPage() {
         try {
           const { added, updated, removed } = payload;
           const recordsToPut: any[] = [];
-          
-          // STRICT FILTER: Only accept shapes. Reject all incoming camera/pointer data!
-          if (added) { 
-            Object.values(added).forEach((r: any) => { 
-              if (r && isShareable(r.id)) recordsToPut.push(r); 
-            }); 
-          }
-          if (updated) { 
-            Object.values(updated).forEach((rp: any) => { 
-              const newRecord = Array.isArray(rp) ? rp[1] : rp; // Handle both array and object formats
-              if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); 
-            }); 
-          }
-          
+          if (added) { Object.values(added).forEach((r: any) => { if (r && isShareable(r.id)) recordsToPut.push(r); }); }
+          if (updated) { Object.values(updated).forEach((rp: any) => { const newRecord = Array.isArray(rp) ? rp[1] : rp; if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); }); }
           if (recordsToPut.length > 0) editorRef.current.store.put(recordsToPut);
-          
-          if (removed) {
-            const ids = Object.keys(removed).filter(id => isShareable(id));
-            if (ids.length > 0) editorRef.current.store.remove(ids);
-          }
-        } catch (e) {
-          console.error("Safely dropped invalid network packet.");
-        }
+          if (removed) { const ids = Object.keys(removed).filter(id => isShareable(id)); if (ids.length > 0) editorRef.current.store.remove(ids); }
+        } catch (e) { }
       });
     });
     
@@ -159,32 +139,18 @@ export default function ClassroomPage() {
     };
   }, [supabase, roomId]);
 
-  // SUPABASE REALTIME (Sending Data)
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
       if (update.source !== 'user') return; 
       if (channelRef.current) {
         try {
-          // STRICT FILTER: Only send shapes. Never broadcast your mouse or camera!
           const { added, updated, removed } = update.changes;
-          
-          const filteredAdded: any = {};
-          Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
-          
-          const filteredUpdated: any = {};
-          Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
-          
-          const filteredRemoved: any = {};
-          Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
-
-          // If you only moved your mouse, don't broadcast anything
+          const filteredAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
+          const filteredUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
+          const filteredRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
           if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
-
-          channelRef.current.send({ 
-            type: 'broadcast', event: 'canvas-update', 
-            payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } 
-          }).catch(() => {});
+          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
         } catch (e) {}
       }
     }, { scope: 'document' });
@@ -227,8 +193,6 @@ export default function ClassroomPage() {
 
   return (
     <div className="flex h-screen w-screen bg-zinc-950 text-white overflow-hidden">
-      
-      {/* ---------------- SIDEBAR NAVIGATION ZONE ---------------- */}
       <aside className="w-[340px] border-r border-zinc-800 bg-zinc-900 flex flex-col justify-between p-4 z-10 shrink-0 relative">
         <div className="space-y-4 flex-1 flex flex-col min-h-0">
           <div className="flex items-center justify-between shrink-0">
@@ -249,54 +213,11 @@ export default function ClassroomPage() {
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
               {isLoading && <div className="p-4 text-center text-xs text-zinc-500 animate-pulse">Loading Database...</div>}
-
-              {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (
-                <button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-800 transition-colors">
-                  <span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" />
-                </button>
-              ))}
-
-              {activeSubject && !activeYear && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>
-                  {Object.keys(curriculumTree[activeSubject] || {}).sort().map((year) => (
-                    <button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && !activeTopic && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>
-                  {Object.keys(curriculumTree[activeSubject][activeYear] || {}).map((topic) => (
-                    <button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && activeTopic && !activeDifficulty && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>
-                  {Object.keys(curriculumTree[activeSubject][activeYear][activeTopic] || {}).map((diff) => (
-                    <button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors">
-                      <div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div>
-                      <span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject][activeYear][activeTopic][diff].length} Qs</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && activeTopic && activeDifficulty && (
-                <div className="space-y-1">
-                  <button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>
-                  {curriculumTree[activeSubject][activeYear][activeTopic][activeDifficulty].map((q: any, idx: number) => (
-                    <button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
-                      <span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span>
-                      <span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span>
-                    </button>
-                  ))}
-                </div>
-              )}
+              {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (<button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-800 transition-colors"><span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}
+              {activeSubject && !activeYear && (<div className="space-y-1"><button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>{Object.keys(curriculumTree[activeSubject] || {}).sort().map((year) => (<button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
+              {activeSubject && activeYear && !activeTopic && (<div className="space-y-1"><button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>{Object.keys(curriculumTree[activeSubject][activeYear] || {}).map((topic) => (<button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
+              {activeSubject && activeYear && activeTopic && !activeDifficulty && (<div className="space-y-1"><button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>{Object.keys(curriculumTree[activeSubject][activeYear][activeTopic] || {}).map((diff) => (<button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div><span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject][activeYear][activeTopic][diff].length} Qs</span></button>))}</div>)}
+              {activeSubject && activeYear && activeTopic && activeDifficulty && (<div className="space-y-1"><button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>{curriculumTree[activeSubject][activeYear][activeTopic][activeDifficulty].map((q: any, idx: number) => (<button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}><span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span><span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span></button>))}</div>)}
             </div>
           </div>
 
@@ -319,12 +240,10 @@ export default function ClassroomPage() {
         </div>
       </aside>
 
-      {/* ---------------- CANVAS & FLOATING HUD ZONE ---------------- */}
       <main className="flex-1 h-full relative bg-zinc-900 overflow-hidden isolate">
-        
         {activeQuestion && (
           <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
-            <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all" title="Close Workspace"><X className="w-5 h-5" /></button>
+            <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
             <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
             <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
             {activeQuestion.formula && (<div className="mt-4 p-3 bg-black/50 rounded-lg border border-zinc-800/50 text-[15px] overflow-x-auto text-emerald-400 text-center"><MathRenderer content={`$${activeQuestion.formula.replace(/^\$|\$$/g, '')}$`} /></div>)}
@@ -338,9 +257,7 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        <div className="absolute inset-0" style={{ zIndex: 0 }}>
-             <Tldraw onMount={handleMount} />
-        </div>
+        <MemoizedWhiteboard onMount={handleMount} />
       </main>
     </div>
   );
