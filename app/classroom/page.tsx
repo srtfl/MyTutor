@@ -1,33 +1,23 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+// 🆕 FIX: Added useCallback to the React imports
+import { useEffect, useState, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 
-// 🚨 IMPORTANT: Make sure you have moved these two CSS lines to your app/layout.tsx file!
-// import 'tldraw/tldraw.css';
-// import 'katex/dist/katex.min.css';
-
-// 2. The Upgraded Math Renderer (Now catches stray/unwrapped AI math commands!)
+// Math Renderer (Unchanged)
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
-
-  // Fix double backslashes
   const cleanContent = content.replace(/\\\\/g, '\\');
-  
-  // 1. First, split by standard LaTeX wrappers ($$, $, \(\), \[\], \begin...\end)
   const parts = cleanContent.split(/(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\([\s\S]*?\\\)|\\[[\s\S]*?\\]|\\begin\{[^}]*\}[\s\S]*?\\end\{[^}]*\})/g);
 
   return (
     <span className="whitespace-pre-wrap">
       {parts.map((part, index) => {
-        let isMath = false;
-        let mathString = part;
-        let displayMode = false;
+        let isMath = false; let mathString = part; let displayMode = false;
 
-        // Detect correctly wrapped math
         if (part.startsWith('$$') && part.endsWith('$$')) {
           isMath = true; displayMode = true; mathString = part.slice(2, -2);
         } else if (part.startsWith('$') && part.endsWith('$')) {
@@ -40,7 +30,6 @@ const MathRenderer = ({ content }: { content: string }) => {
           isMath = true; displayMode = true; mathString = part; 
         }
 
-        // Render standard math blocks
         if (isMath) {
           try {
             let safeMath = mathString.replace(/\\begin\{array\}\{[^}]*\}/g, '\\begin{array}{c c c c c c c}');
@@ -52,24 +41,20 @@ const MathRenderer = ({ content }: { content: string }) => {
           }
         }
 
-        // --- THE NEW FIX: Catch stray, unwrapped commands in regular text ---
-        // This hunts for \sqrt{...}, \times, \frac{...}{...}, etc., that the AI forgot to wrap
         const strayRegex = /(\\[a-zA-Z]+(?:\[[^\]]*\])?(?:\{[^{}]*\})*)/g;
         const textParts = part.split(strayRegex);
 
         return (
           <span key={index}>
             {textParts.map((textPart, i) => {
-              // If we caught a stray math command (and it's not a literal \n line break)
               if (textPart.startsWith('\\') && textPart !== '\\n' && textPart.length > 1) {
                 try {
                   const html = katex.renderToString(textPart, { throwOnError: true, displayMode: false, strict: false });
                   return <span key={i} dangerouslySetInnerHTML={{ __html: html }} />;
                 } catch (e) {
-                  return <span key={i}>{textPart}</span>; // Fallback to raw text if it fails
+                  return <span key={i}>{textPart}</span>;
                 }
               }
-              // Normal text: handle literal newlines and render
               return <span key={i}>{textPart.replace(/\\n/g, '\n')}</span>;
             })}
           </span>
@@ -86,7 +71,6 @@ const Tldraw = dynamic(
   },
   { 
     ssr: false,
-    // 🆕 FIX: Added a visual loading state
     loading: () => (
       <div className="absolute inset-0 flex items-center justify-center text-zinc-500 font-mono text-sm animate-pulse bg-zinc-900">
         Loading Whiteboard Engine...
@@ -117,7 +101,8 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  const roomId = 'global-classroom-session-1'; 
+  // 🆕 FIX: Changed to session-2 to ensure a clean slate in the Supabase channel
+  const roomId = 'global-classroom-session-2'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -176,7 +161,9 @@ export default function ClassroomPage() {
     };
   }, [supabase, roomId]);
 
-  const handleMount = (editor: any) => {
+  // 🆕 FIX: Wrapped handleMount in useCallback. 
+  // This prevents React from thinking the whiteboard needs to be destroyed and recreated every time the "ONLINE" button flashes.
+  const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
       if (update.source !== 'user') return; 
@@ -185,7 +172,7 @@ export default function ClassroomPage() {
         payload: { added: update.changes.added, updated: update.changes.updated, removed: update.changes.removed },
       });
     }, { scope: 'document' });
-  };
+  }, [supabase, roomId]);
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -327,7 +314,7 @@ export default function ClassroomPage() {
                       key={q.id} 
                       onClick={() => {
                         setActiveQuestion(q);
-                        setShowSolution(false); // Reset solution toggle automatically!
+                        setShowSolution(false);
                       }} 
                       className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
                     >
@@ -381,7 +368,6 @@ export default function ClassroomPage() {
       {/* ---------------- CANVAS & FLOATING HUD ZONE ---------------- */}
       <main className="flex-1 h-full relative bg-zinc-900 overflow-hidden">
         
-        {/* FIX 1: HUD is now Top-Left (top-20 left-6), avoiding the Tldraw tools completely! */}
         {activeQuestion && (
           <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
             
@@ -411,7 +397,6 @@ export default function ClassroomPage() {
               </div>
             )}
             
-            {/* FIX 2: Hide/Reveal Solution Button */}
             <div className="mt-5 pt-4 border-t border-zinc-800/50">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Tutor Solution Reference</p>
@@ -432,7 +417,6 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        {/* 🚨 THE FIX: Tldraw is now explicitly sized and anchored! */}
         <div className="absolute inset-0 z-0">
           <Tldraw onMount={handleMount} />
         </div>

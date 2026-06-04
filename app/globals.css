@@ -1,4 +1,10 @@
 @import "tailwindcss";
+@import 'tldraw/tldraw.css';
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: #ffffff;
