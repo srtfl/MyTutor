@@ -1,6 +1,15 @@
-import type { Metadata } from "next";
+
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+
+// 🆕 FIX: Move third-party CSS imports here so production builds don't strip them!
+import 'tldraw/tldraw.css';
+import 'katex/dist/katex.min.css';
+
+const inter = Inter({ subsets: ['latin'] });
 
 const geistSans = Geist({
   variable: "--font-geist-sans",

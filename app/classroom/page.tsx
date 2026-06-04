@@ -4,12 +4,12 @@ import { useEffect, useState, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
-import 'tldraw/tldraw.css';
-
 import katex from 'katex';
-import 'katex/dist/katex.min.css';
 
-// 2. The Upgraded Math Renderer (Now sanitizes toxic AI array syntax!)
+// 🚨 IMPORTANT: Make sure you have moved these two CSS lines to your app/layout.tsx file!
+// import 'tldraw/tldraw.css';
+// import 'katex/dist/katex.min.css';
+
 // 2. The Upgraded Math Renderer (Now catches stray/unwrapped AI math commands!)
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
@@ -84,7 +84,15 @@ const Tldraw = dynamic(
     const component = await import('tldraw');
     return component.Tldraw;
   },
-  { ssr: false }
+  { 
+    ssr: false,
+    // 🆕 FIX: Added a visual loading state
+    loading: () => (
+      <div className="absolute inset-0 flex items-center justify-center text-zinc-500 font-mono text-sm animate-pulse bg-zinc-900">
+        Loading Whiteboard Engine...
+      </div>
+    )
+  }
 );
 
 export default function ClassroomPage() {
@@ -424,7 +432,10 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        <Tldraw onMount={handleMount} />
+        {/* 🚨 THE FIX: Tldraw is now explicitly sized and anchored! */}
+        <div className="absolute inset-0 z-0">
+          <Tldraw onMount={handleMount} />
+        </div>
       </main>
     </div>
   );
