@@ -1,13 +1,12 @@
 'use client';
 
-// 🆕 FIX: Added useCallback to the React imports
 import { useEffect, useState, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 
-// Math Renderer (Unchanged)
+// 1. Math Renderer (Unchanged)
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
   const cleanContent = content.replace(/\\\\/g, '\\');
@@ -17,7 +16,6 @@ const MathRenderer = ({ content }: { content: string }) => {
     <span className="whitespace-pre-wrap">
       {parts.map((part, index) => {
         let isMath = false; let mathString = part; let displayMode = false;
-
         if (part.startsWith('$$') && part.endsWith('$$')) {
           isMath = true; displayMode = true; mathString = part.slice(2, -2);
         } else if (part.startsWith('$') && part.endsWith('$')) {
@@ -43,7 +41,6 @@ const MathRenderer = ({ content }: { content: string }) => {
 
         const strayRegex = /(\\[a-zA-Z]+(?:\[[^\]]*\])?(?:\{[^{}]*\})*)/g;
         const textParts = part.split(strayRegex);
-
         return (
           <span key={index}>
             {textParts.map((textPart, i) => {
@@ -52,7 +49,7 @@ const MathRenderer = ({ content }: { content: string }) => {
                   const html = katex.renderToString(textPart, { throwOnError: true, displayMode: false, strict: false });
                   return <span key={i} dangerouslySetInnerHTML={{ __html: html }} />;
                 } catch (e) {
-                  return <span key={i}>{textPart}</span>;
+                  return <span key={i}>{textPart}</span>; 
                 }
               }
               return <span key={i}>{textPart.replace(/\\n/g, '\n')}</span>;
@@ -64,19 +61,19 @@ const MathRenderer = ({ content }: { content: string }) => {
   );
 };
 
+// 🆕 FIX 1: Extracted the loading state to a stable reference so Next.js doesn't crash on re-render!
+const LoadingWhiteboard = () => (
+  <div className="absolute inset-0 flex items-center justify-center text-zinc-500 font-mono text-sm animate-pulse bg-zinc-900">
+    Loading Whiteboard Engine...
+  </div>
+);
+
 const Tldraw = dynamic(
   async () => {
     const component = await import('tldraw');
     return component.Tldraw;
   },
-  { 
-    ssr: false,
-    loading: () => (
-      <div className="absolute inset-0 flex items-center justify-center text-zinc-500 font-mono text-sm animate-pulse bg-zinc-900">
-        Loading Whiteboard Engine...
-      </div>
-    )
-  }
+  { ssr: false, loading: LoadingWhiteboard }
 );
 
 export default function ClassroomPage() {
@@ -85,6 +82,9 @@ export default function ClassroomPage() {
   const [peerCount, setPeerCount] = useState(1);
   const editorRef = useRef<any>(null);
   
+  // 🆕 FIX 2: Create a secure reference to the active Supabase Channel
+  const channelRef = useRef<any>(null);
+
   const [curriculumTree, setCurriculumTree] = useState<any>({});
   const [activeSubject, setActiveSubject] = useState<string | null>(null);
   const [activeYear, setActiveYear] = useState<string | null>(null);
@@ -101,8 +101,7 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  // 🆕 FIX: Changed to session-2 to ensure a clean slate in the Supabase channel
-  const roomId = 'global-classroom-session-2'; 
+  const roomId = 'global-classroom-session-1'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -133,8 +132,12 @@ export default function ClassroomPage() {
 
   useEffect(() => {
     const channel = supabase.channel(`classroom:${roomId}`, { config: { broadcast: { self: false }, presence: { key: roomId } } });
+    
+    // Save the active channel to our secure reference
+    channelRef.current = channel;
+
     channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
-      if (!editorRef.current) return;
+      if (!editorRef.current || !editorRef.current.store) return;
       editorRef.current.store.mergeRemoteChanges(() => {
         try {
           const { added, updated, removed } = payload;
@@ -151,8 +154,10 @@ export default function ClassroomPage() {
     });
     channel.on('presence', { event: 'sync' }, () => setPeerCount(Object.keys(channel.presenceState()).length || 1));
     channel.subscribe((status) => setIsConnected(status === 'SUBSCRIBED'));
+    
     return () => {
       channel.unsubscribe();
+      channelRef.current = null;
       if (agoraClientRef.current) {
         localTracksRef.current.audioTrack?.close();
         localTracksRef.current.videoTrack?.close();
@@ -161,18 +166,21 @@ export default function ClassroomPage() {
     };
   }, [supabase, roomId]);
 
-  // 🆕 FIX: Wrapped handleMount in useCallback. 
-  // This prevents React from thinking the whiteboard needs to be destroyed and recreated every time the "ONLINE" button flashes.
+  // 🆕 FIX 3: Broadcast using the secure channel reference so it doesn't duplicate and crash!
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
       if (update.source !== 'user') return; 
-      supabase.channel(`classroom:${roomId}`).send({
-        type: 'broadcast', event: 'canvas-update',
-        payload: { added: update.changes.added, updated: update.changes.updated, removed: update.changes.removed },
-      });
+      
+      // Use the existing channel instead of creating a new one every time the mouse moves
+      if (channelRef.current) {
+        channelRef.current.send({
+          type: 'broadcast', event: 'canvas-update',
+          payload: { added: update.changes.added, updated: update.changes.updated, removed: update.changes.removed },
+        }).catch(() => {}); // Catch silent WebSocket errors so they don't break the canvas!
+      }
     }, { scope: 'document' });
-  }, [supabase, roomId]);
+  }, []);
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -417,7 +425,8 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        <div className="absolute inset-0 z-0">
+        {/* FIX 4: Explicit, forced styles on the container so Tldraw never collapses to zero height */}
+        <div className="absolute inset-0 z-0" style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}>
           <Tldraw onMount={handleMount} />
         </div>
       </main>
