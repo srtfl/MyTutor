@@ -115,7 +115,7 @@ const WhiteboardEngine = React.memo(() => {
 
   return (
     <div className="absolute inset-0 z-0">
-      <DynamicTldraw darkMode={true} onMount={handleMount} />
+      <DynamicTldraw  onMount={handleMount} />
     </div>
   );
 });
