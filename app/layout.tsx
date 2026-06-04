@@ -27,6 +27,15 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        {/* Load KaTeX CSS globally */}
+        <link 
+          rel="stylesheet" 
+          href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" 
+          integrity="sha384-n8MVd4RsRQf109gYB0u1AIfXjBcsQxM5fBXTBqS2AIT1rLq//b0uE1r5PryM7/O3" 
+          crossOrigin="anonymous" 
+        />
+      </head>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
