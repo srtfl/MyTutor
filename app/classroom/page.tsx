@@ -9,25 +9,7 @@ import 'katex/dist/katex.min.css';
 import 'tldraw/tldraw.css';
 
 // ---------------------------------------------------------
-// 1. ISOLATED WHITEBOARD ARCHITECTURE (The Core Fix)
-// ---------------------------------------------------------
-const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { ssr: false });
-
-// React.memo prevents the canvas from EVER re-rendering when sidebar state changes
-const Whiteboard = React.memo(({ onMount }: { onMount: (editor: any) => void }) => {
-  return (
-    // 'fixed' and '100vw' guarantees it physically cannot collapse to a black screen
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 0 }}>
-      <DynamicTldraw onMount={onMount} />
-    </div>
-  );
-});
-Whiteboard.displayName = 'Whiteboard';
-
-const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
-
-// ---------------------------------------------------------
-// 2. MATH RENDERER
+// 1. MATH RENDERER (Unchanged)
 // ---------------------------------------------------------
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
@@ -75,14 +57,78 @@ const MathRenderer = ({ content }: { content: string }) => {
 
 
 // ---------------------------------------------------------
-// 3. MAIN CLASSROOM PAGE
+// 2. THE ISOLATED WHITEBOARD ENGINE (The Ultimate Fix)
+// ---------------------------------------------------------
+const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
+  ssr: false,
+  loading: () => <div className="absolute inset-0 flex items-center justify-center bg-zinc-900 text-zinc-500 font-mono text-sm animate-pulse">Starting Canvas Engine...</div> 
+});
+
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
+const ROOM_ID = 'global-classroom-v5'; // Fresh ID to prevent ghosts
+
+// React.memo + Independent State ensures this component NEVER re-renders when the sidebar updates
+const WhiteboardEngine = React.memo(() => {
+  const [supabase] = useState(() => createClient());
+  const editorRef = useRef<any>(null);
+  const channelRef = useRef<any>(null);
+
+  useEffect(() => {
+    const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false } } });
+    channelRef.current = channel;
+
+    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
+      if (!editorRef.current || !editorRef.current.store) return;
+      editorRef.current.store.mergeRemoteChanges(() => {
+        try {
+          const { added, updated, removed } = payload;
+          const recordsToPut: any[] = [];
+          if (added) { Object.values(added).forEach((r: any) => { if (r && isShareable(r.id)) recordsToPut.push(r); }); }
+          if (updated) { Object.values(updated).forEach((rp: any) => { const newRecord = Array.isArray(rp) ? rp[1] : rp; if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); }); }
+          if (recordsToPut.length > 0) editorRef.current.store.put(recordsToPut);
+          if (removed) { const ids = Object.keys(removed).filter(id => isShareable(id)); if (ids.length > 0) editorRef.current.store.remove(ids); }
+        } catch (e) { console.error("Canvas dropped a corrupt network packet safely."); }
+      });
+    });
+    
+    channel.subscribe();
+    return () => { channel.unsubscribe(); channelRef.current = null; };
+  }, [supabase]);
+
+  const handleMount = useCallback((editor: any) => {
+    editorRef.current = editor;
+    editor.store.listen((update: any) => {
+      if (update.source !== 'user') return; 
+      if (channelRef.current) {
+        try {
+          const { added, updated, removed } = update.changes;
+          const filteredAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
+          const filteredUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
+          const filteredRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
+          if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
+          
+          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
+        } catch (e) {}
+      }
+    }, { scope: 'document' });
+  }, []);
+
+  return (
+    <div className="absolute inset-0 z-0">
+      <DynamicTldraw darkMode={true} onMount={handleMount} />
+    </div>
+  );
+});
+WhiteboardEngine.displayName = "WhiteboardEngine";
+
+
+// ---------------------------------------------------------
+// 3. MAIN CLASSROOM UI
 // ---------------------------------------------------------
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
   const [peerCount, setPeerCount] = useState(1);
-  const editorRef = useRef<any>(null);
-  const channelRef = useRef<any>(null);
 
   const [curriculumTree, setCurriculumTree] = useState<any>({});
   const [activeSubject, setActiveSubject] = useState<string | null>(null);
@@ -99,8 +145,6 @@ export default function ClassroomPage() {
   const localTracksRef = useRef<{ videoTrack: any; audioTrack: any }>({ videoTrack: null, audioTrack: null });
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
-
-  const roomId = 'global-classroom-indestructible'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -122,65 +166,16 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // SUPABASE REALTIME (Receiving Data)
+  // Sidebar handles presence only (completely separated from canvas drawing data)
   useEffect(() => {
-    const channel = supabase.channel(`classroom:${roomId}`, { config: { broadcast: { self: false }, presence: { key: roomId } } });
-    channelRef.current = channel;
-
-    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
-      if (!editorRef.current || !editorRef.current.store) return;
-      editorRef.current.store.mergeRemoteChanges(() => {
-        const { added, updated, removed } = payload;
-        
-        // HEAVY ARMOR: Try/catch every single individual record to ensure corrupt data never crashes the canvas
-        if (added) {
-          Object.values(added).forEach((r: any) => {
-            if (r && isShareable(r.id)) { try { editorRef.current.store.put([r]); } catch(e) {} }
-          });
-        }
-        if (updated) {
-          Object.values(updated).forEach((rp: any) => {
-            const newRecord = Array.isArray(rp) ? rp[1] : rp;
-            if (newRecord && isShareable(newRecord.id)) { try { editorRef.current.store.put([newRecord]); } catch(e) {} }
-          });
-        }
-        if (removed) {
-          Object.keys(removed).forEach((id: string) => {
-            if (isShareable(id)) { try { editorRef.current.store.remove([id]); } catch(e) {} }
-          });
-        }
-      });
-    });
-    
+    const channel = supabase.channel(`presence:${ROOM_ID}`, { config: { presence: { key: ROOM_ID } } });
     channel.on('presence', { event: 'sync' }, () => setPeerCount(Object.keys(channel.presenceState()).length || 1));
     channel.subscribe((status) => setIsConnected(status === 'SUBSCRIBED'));
-    
     return () => {
-      channel.unsubscribe(); channelRef.current = null;
+      channel.unsubscribe(); 
       if (agoraClientRef.current) { localTracksRef.current.audioTrack?.close(); localTracksRef.current.videoTrack?.close(); agoraClientRef.current.leave(); }
     };
-  }, [supabase, roomId]);
-
-  // SUPABASE REALTIME (Sending Data)
-  // useCallback guarantees this function NEVER changes, protecting the Memoized Whiteboard.
-  const handleMount = useCallback((editor: any) => {
-    editorRef.current = editor;
-    editor.store.listen((update: any) => {
-      if (update.source !== 'user') return; 
-      if (channelRef.current) {
-        try {
-          const { added, updated, removed } = update.changes;
-          const filteredAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
-          const filteredUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
-          const filteredRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
-          if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
-          
-          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
-        } catch (e) {}
-      }
-    }, { scope: 'document' });
-  }, []);
-
+  }, [supabase]);
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -199,7 +194,7 @@ export default function ClassroomPage() {
       await initializeAgora(); const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
       if (!localTracksRef.current.audioTrack) {
         const audioTrack = await AgoraRTC.createMicrophoneAudioTrack(); localTracksRef.current.audioTrack = audioTrack;
-        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', roomId, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
+        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', ROOM_ID, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
         await agoraClientRef.current.publish([audioTrack]); setIsMuted(false);
       } else { await localTracksRef.current.audioTrack.setEnabled(isMuted); setIsMuted(!isMuted); }
     } catch (err) {}
@@ -210,7 +205,7 @@ export default function ClassroomPage() {
       await initializeAgora(); const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
       if (!localTracksRef.current.videoTrack) {
         const videoTrack = await AgoraRTC.createCameraVideoTrack(); localTracksRef.current.videoTrack = videoTrack;
-        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', roomId, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
+        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', ROOM_ID, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
         await agoraClientRef.current.publish([videoTrack]);
         if (localVideoRef.current) videoTrack.play(localVideoRef.current); setIsVideoOn(true);
       } else { await localTracksRef.current.videoTrack.setEnabled(!isVideoOn); setIsVideoOn(!isVideoOn); }
@@ -220,8 +215,7 @@ export default function ClassroomPage() {
   return (
     <div className="flex h-screen w-screen bg-zinc-950 text-white overflow-hidden">
       
-      {/* ---------------- SIDEBAR NAVIGATION ZONE ---------------- */}
-      {/* z-10 ensures it floats cleanly above the fixed canvas background */}
+      {/* SIDEBAR UI */}
       <aside className="w-[340px] border-r border-zinc-800 bg-zinc-900 flex flex-col justify-between p-4 z-10 shrink-0 relative shadow-2xl">
         <div className="space-y-4 flex-1 flex flex-col min-h-0">
           <div className="flex items-center justify-between shrink-0">
@@ -244,19 +238,19 @@ export default function ClassroomPage() {
               {isLoading && <div className="p-4 text-center text-xs text-zinc-500 animate-pulse">Loading Database...</div>}
               {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (<button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-800 transition-colors"><span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}
               {activeSubject && !activeYear && (<div className="space-y-1"><button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>{Object.keys(curriculumTree[activeSubject] || {}).sort().map((year) => (<button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
-              {activeSubject && activeYear && !activeTopic && (<div className="space-y-1"><button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>{Object.keys(curriculumTree[activeSubject][activeYear] || {}).map((topic) => (<button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
+              {activeSubject && !activeYear && !activeTopic && (<div className="space-y-1"><button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>{Object.keys(curriculumTree[activeSubject][activeYear] || {}).map((topic) => (<button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
               {activeSubject && activeYear && activeTopic && !activeDifficulty && (<div className="space-y-1"><button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>{Object.keys(curriculumTree[activeSubject][activeYear][activeTopic] || {}).map((diff) => (<button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div><span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject][activeYear][activeTopic][diff].length} Qs</span></button>))}</div>)}
               {activeSubject && activeYear && activeTopic && activeDifficulty && (<div className="space-y-1"><button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>{curriculumTree[activeSubject][activeYear][activeTopic][activeDifficulty].map((q: any, idx: number) => (<button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}><span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span><span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span></button>))}</div>)}
             </div>
           </div>
 
-          <div className="space-y-2 shrink-0">
+          <div className="space-y-2 shrink-0 relative z-20">
             <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={remoteVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" /><span className="text-xs text-zinc-600 font-mono z-10">Remote Video Stream</span></div>
             <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={localVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" />{!isVideoOn && <span className="text-xs text-zinc-600 font-mono z-10">Your Camera Off</span>}</div>
           </div>
         </div>
 
-        <div className="pt-4 border-t border-zinc-800 space-y-3 mt-4 shrink-0">
+        <div className="pt-4 border-t border-zinc-800 space-y-3 mt-4 shrink-0 relative z-20">
           <div className="flex items-center justify-between text-xs">
             <span className="text-zinc-400 flex items-center gap-1.5"><Wifi className={`w-3.5 h-3.5 ${isConnected ? 'text-emerald-500' : 'text-zinc-500'}`} />Signaling Server</span>
             <span className={`font-mono text-xs ${isConnected ? 'text-emerald-400' : 'text-amber-400'}`}>{isConnected ? 'ONLINE' : 'CONNECTING...'}</span>
@@ -269,10 +263,11 @@ export default function ClassroomPage() {
         </div>
       </aside>
 
-      {/* ---------------- HUD LAYER ---------------- */}
-      <div className="flex-1 relative z-10 pointer-events-none">
+      <main className="flex-1 h-full relative bg-zinc-900 overflow-hidden isolate">
+        
+        {/* HUD FLOATING LAYER */}
         {activeQuestion && (
-          <div className="absolute top-6 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300 pointer-events-auto">
+          <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
             <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
             <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
             <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
@@ -286,12 +281,11 @@ export default function ClassroomPage() {
             </div>
           </div>
         )}
-      </div>
 
-      {/* ---------------- CANVAS LAYER ---------------- */}
-      {/* Rendered ONCE. Never interrupted by React again. */}
-      <Whiteboard onMount={handleMount} />
-      
+        {/* 🚨 THE AUTONOMOUS WHITEBOARD */}
+        <WhiteboardEngine />
+        
+      </main>
     </div>
   );
 }
