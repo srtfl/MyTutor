@@ -9,7 +9,111 @@ import 'katex/dist/katex.min.css';
 import 'tldraw/tldraw.css';
 
 // ---------------------------------------------------------
-// 1. MATH RENDERER (Unchanged)
+// 0. THE CRASH CATCHER (Turns silent black screens into visible errors)
+// ---------------------------------------------------------
+class CrashCatcher extends React.Component<{children: React.ReactNode}, {hasError: boolean, errorMessage: string}> {
+  constructor(props: any) { super(props); this.state = { hasError: false, errorMessage: '' }; }
+  static getDerivedStateFromError(error: any) { return { hasError: true, errorMessage: error.toString() }; }
+  componentDidCatch(error: any, info: any) { console.error("FATAL CANVAS CRASH:", error, info); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="absolute inset-0 z-[999] flex flex-col items-center justify-center bg-black p-10 text-rose-500 font-mono">
+          <h1 className="text-2xl font-bold mb-4 uppercase tracking-widest text-white">Whiteboard Crash Intercepted</h1>
+          <p className="text-sm text-zinc-400 mb-6">Take a screenshot of this error and show it to the developer:</p>
+          <div className="bg-rose-950/30 p-6 rounded-lg border border-rose-900 w-full max-w-3xl overflow-auto text-[13px]">
+            {this.state.errorMessage}
+          </div>
+          <button onClick={() => window.location.reload()} className="mt-8 bg-zinc-800 text-white px-6 py-2 rounded hover:bg-zinc-700">Reload Page</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ---------------------------------------------------------
+// 1. ISOLATED WHITEBOARD ENGINE
+// ---------------------------------------------------------
+const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { ssr: false });
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
+
+const WhiteboardEngine = React.memo(() => {
+  const [supabase] = useState(() => createClient());
+  const editorRef = useRef<any>(null);
+  const channelRef = useRef<any>(null);
+
+  useEffect(() => {
+    const channel = supabase.channel(`canvas:global-classroom-diagnostic`, { config: { broadcast: { self: false } } });
+    channelRef.current = channel;
+
+    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
+      if (!editorRef.current || !editorRef.current.store) return;
+      
+      try {
+        const { added, updated, removed } = payload;
+        const recordsToPut: any[] = [];
+        
+        // HYPER-DEFENSIVE CHECKS: Only process if data is explicitly a valid object
+        if (added && typeof added === 'object') {
+          Object.values(added).forEach((r: any) => { if (r && r.id && isShareable(r.id)) recordsToPut.push(r); });
+        }
+        if (updated && typeof updated === 'object') {
+          Object.values(updated).forEach((rp: any) => {
+            const newRecord = Array.isArray(rp) ? rp[1] : rp;
+            if (newRecord && newRecord.id && isShareable(newRecord.id)) recordsToPut.push(newRecord);
+          });
+        }
+        
+        if (recordsToPut.length > 0) {
+          editorRef.current.store.mergeRemoteChanges(() => { editorRef.current.store.put(recordsToPut); });
+        }
+        
+        if (removed && typeof removed === 'object') {
+          const ids = Object.keys(removed).filter(id => isShareable(id));
+          if (ids.length > 0) {
+            editorRef.current.store.mergeRemoteChanges(() => { editorRef.current.store.remove(ids); });
+          }
+        }
+      } catch (e) {
+        console.warn("Blocked a corrupted network packet from crashing the canvas.", e);
+      }
+    });
+    
+    channel.subscribe();
+    return () => { channel.unsubscribe(); channelRef.current = null; };
+  }, [supabase]);
+
+  const handleMount = useCallback((editor: any) => {
+    editorRef.current = editor;
+    editor.store.listen((update: any) => {
+      if (update.source !== 'user') return; 
+      if (channelRef.current) {
+        try {
+          const { added, updated, removed } = update.changes;
+          const filteredAdded: any = {}; const filteredUpdated: any = {}; const filteredRemoved: any = {};
+          
+          if (added) Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
+          if (updated) Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
+          if (removed) Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
+          
+          if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
+          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
+        } catch (e) {}
+      }
+    }, { scope: 'document' });
+  }, []);
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', zIndex: 0 }}>
+      <DynamicTldraw onMount={handleMount} />
+    </div>
+  );
+});
+WhiteboardEngine.displayName = "WhiteboardEngine";
+
+// ---------------------------------------------------------
+// 2. MATH RENDERER
 // ---------------------------------------------------------
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
@@ -41,10 +145,8 @@ const MathRenderer = ({ content }: { content: string }) => {
           <span key={index}>
             {textParts.map((textPart, i) => {
               if (textPart.startsWith('\\') && textPart !== '\\n' && textPart.length > 1) {
-                try {
-                  const html = katex.renderToString(textPart, { throwOnError: true, displayMode: false, strict: false });
-                  return <span key={i} dangerouslySetInnerHTML={{ __html: html }} />;
-                } catch (e) { return <span key={i}>{textPart}</span>; }
+                try { const html = katex.renderToString(textPart, { throwOnError: true, displayMode: false, strict: false }); return <span key={i} dangerouslySetInnerHTML={{ __html: html }} />; } 
+                catch (e) { return <span key={i}>{textPart}</span>; }
               }
               return <span key={i}>{textPart.replace(/\\n/g, '\n')}</span>;
             })}
@@ -55,75 +157,8 @@ const MathRenderer = ({ content }: { content: string }) => {
   );
 };
 
-
 // ---------------------------------------------------------
-// 2. THE ISOLATED WHITEBOARD ENGINE (The Ultimate Fix)
-// ---------------------------------------------------------
-const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
-  ssr: false,
-  loading: () => <div className="absolute inset-0 flex items-center justify-center bg-zinc-900 text-zinc-500 font-mono text-sm animate-pulse">Starting Canvas Engine...</div> 
-});
-
-const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('asset:') || id.startsWith('binding:');
-const ROOM_ID = 'global-classroom-v5'; // Fresh ID to prevent ghosts
-
-// React.memo + Independent State ensures this component NEVER re-renders when the sidebar updates
-const WhiteboardEngine = React.memo(() => {
-  const [supabase] = useState(() => createClient());
-  const editorRef = useRef<any>(null);
-  const channelRef = useRef<any>(null);
-
-  useEffect(() => {
-    const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false } } });
-    channelRef.current = channel;
-
-    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
-      if (!editorRef.current || !editorRef.current.store) return;
-      editorRef.current.store.mergeRemoteChanges(() => {
-        try {
-          const { added, updated, removed } = payload;
-          const recordsToPut: any[] = [];
-          if (added) { Object.values(added).forEach((r: any) => { if (r && isShareable(r.id)) recordsToPut.push(r); }); }
-          if (updated) { Object.values(updated).forEach((rp: any) => { const newRecord = Array.isArray(rp) ? rp[1] : rp; if (newRecord && isShareable(newRecord.id)) recordsToPut.push(newRecord); }); }
-          if (recordsToPut.length > 0) editorRef.current.store.put(recordsToPut);
-          if (removed) { const ids = Object.keys(removed).filter(id => isShareable(id)); if (ids.length > 0) editorRef.current.store.remove(ids); }
-        } catch (e) { console.error("Canvas dropped a corrupt network packet safely."); }
-      });
-    });
-    
-    channel.subscribe();
-    return () => { channel.unsubscribe(); channelRef.current = null; };
-  }, [supabase]);
-
-  const handleMount = useCallback((editor: any) => {
-    editorRef.current = editor;
-    editor.store.listen((update: any) => {
-      if (update.source !== 'user') return; 
-      if (channelRef.current) {
-        try {
-          const { added, updated, removed } = update.changes;
-          const filteredAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) filteredAdded[id] = added[id]; });
-          const filteredUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) filteredUpdated[id] = updated[id]; });
-          const filteredRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) filteredRemoved[id] = removed[id]; });
-          if (Object.keys(filteredAdded).length === 0 && Object.keys(filteredUpdated).length === 0 && Object.keys(filteredRemoved).length === 0) return;
-          
-          channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: filteredAdded, updated: filteredUpdated, removed: filteredRemoved } }).catch(() => {});
-        } catch (e) {}
-      }
-    }, { scope: 'document' });
-  }, []);
-
-  return (
-    <div className="absolute inset-0 z-0">
-      <DynamicTldraw  onMount={handleMount} />
-    </div>
-  );
-});
-WhiteboardEngine.displayName = "WhiteboardEngine";
-
-
-// ---------------------------------------------------------
-// 3. MAIN CLASSROOM UI
+// 3. MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
@@ -166,56 +201,20 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // Sidebar handles presence only (completely separated from canvas drawing data)
+  // Sidebar handles presence only
   useEffect(() => {
-    const channel = supabase.channel(`presence:${ROOM_ID}`, { config: { presence: { key: ROOM_ID } } });
+    const channel = supabase.channel(`presence:global-classroom-diagnostic`, { config: { presence: { key: 'diagnostic' } } });
     channel.on('presence', { event: 'sync' }, () => setPeerCount(Object.keys(channel.presenceState()).length || 1));
     channel.subscribe((status) => setIsConnected(status === 'SUBSCRIBED'));
-    return () => {
-      channel.unsubscribe(); 
-      if (agoraClientRef.current) { localTracksRef.current.audioTrack?.close(); localTracksRef.current.videoTrack?.close(); agoraClientRef.current.leave(); }
-    };
+    return () => { channel.unsubscribe(); };
   }, [supabase]);
 
-  const initializeAgora = async () => {
-    const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-    if (!agoraClientRef.current) {
-      agoraClientRef.current = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
-      agoraClientRef.current.on('user-published', async (user: any, mediaType: 'video' | 'audio') => {
-        await agoraClientRef.current.subscribe(user, mediaType);
-        if (mediaType === 'video' && remoteVideoRef.current) { remoteVideoRef.current.innerHTML = ''; user.videoTrack.play(remoteVideoRef.current); }
-        if (mediaType === 'audio') user.audioTrack.play();
-      });
-    }
-  };
-
-  const toggleAudio = async () => {
-    try {
-      await initializeAgora(); const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-      if (!localTracksRef.current.audioTrack) {
-        const audioTrack = await AgoraRTC.createMicrophoneAudioTrack(); localTracksRef.current.audioTrack = audioTrack;
-        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', ROOM_ID, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
-        await agoraClientRef.current.publish([audioTrack]); setIsMuted(false);
-      } else { await localTracksRef.current.audioTrack.setEnabled(isMuted); setIsMuted(!isMuted); }
-    } catch (err) {}
-  };
-
-  const toggleVideo = async () => {
-    try {
-      await initializeAgora(); const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-      if (!localTracksRef.current.videoTrack) {
-        const videoTrack = await AgoraRTC.createCameraVideoTrack(); localTracksRef.current.videoTrack = videoTrack;
-        if (agoraClientRef.current.connectionState === 'DISCONNECTED') await agoraClientRef.current.join('9bb4c1b7a3c14481ba51b83074108c83', ROOM_ID, '007eJxTYNhmZdAYb3ZNxnOlg7HL/pKl+7ISGk6eOP6T27PyoFp41UEFBsukJJNkwyTzRONkQxMTC8OkRFPDJAtjA3MTQwOLZAvjWyUKWQ2BjAyWZxkYGKEQxJdiSM/JT0rM0U3OSSwuLsrPz9UtTi0uzszP0zVkYAAAET8meA==', null);
-        await agoraClientRef.current.publish([videoTrack]);
-        if (localVideoRef.current) videoTrack.play(localVideoRef.current); setIsVideoOn(true);
-      } else { await localTracksRef.current.videoTrack.setEnabled(!isVideoOn); setIsVideoOn(!isVideoOn); }
-    } catch (err) {}
-  };
+  const toggleAudio = async () => { setIsMuted(!isMuted); };
+  const toggleVideo = async () => { setIsVideoOn(!isVideoOn); };
 
   return (
     <div className="flex h-screen w-screen bg-zinc-950 text-white overflow-hidden">
       
-      {/* SIDEBAR UI */}
       <aside className="w-[340px] border-r border-zinc-800 bg-zinc-900 flex flex-col justify-between p-4 z-10 shrink-0 relative shadow-2xl">
         <div className="space-y-4 flex-1 flex flex-col min-h-0">
           <div className="flex items-center justify-between shrink-0">
@@ -234,56 +233,13 @@ export default function ClassroomPage() {
               <FolderTree className="w-4 h-4 text-blue-500" />
               <h3 className="text-sm font-medium">Curriculum Browser</h3>
             </div>
-         <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
               {isLoading && <div className="p-4 text-center text-xs text-zinc-500 animate-pulse">Loading Database...</div>}
-
-              {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (
-                <button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-800 transition-colors">
-                  <span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" />
-                </button>
-              ))}
-
-              {activeSubject && !activeYear && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>
-                  {Object.keys(curriculumTree[activeSubject!] || {}).sort().map((year) => (
-                    <button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && !activeTopic && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>
-                  {Object.keys(curriculumTree[activeSubject!][activeYear!] || {}).map((topic) => (
-                    <button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && activeTopic && !activeDifficulty && (
-                <div className="space-y-1">
-                  <button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>
-                  {Object.keys(curriculumTree[activeSubject!][activeYear!][activeTopic!] || {}).map((diff) => (
-                    <button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors">
-                      <div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div>
-                      <span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject!][activeYear!][activeTopic!][diff].length} Qs</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {activeSubject && activeYear && activeTopic && activeDifficulty && (
-                <div className="space-y-1">
-                  <button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>
-                  {curriculumTree[activeSubject!][activeYear!][activeTopic!][activeDifficulty!].map((q: any, idx: number) => (
-                    <button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
-                      <span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span>
-                      <span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span>
-                    </button>
-                  ))}
-                </div>
-              )}
+              {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (<button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-800 transition-colors"><span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}
+              {activeSubject && !activeYear && (<div className="space-y-1"><button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>{Object.keys(curriculumTree[activeSubject!] || {}).sort().map((year) => (<button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-sm border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
+              {activeSubject && activeYear && !activeTopic && (<div className="space-y-1"><button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>{Object.keys(curriculumTree[activeSubject!][activeYear!] || {}).map((topic) => (<button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
+              {activeSubject && activeYear && activeTopic && !activeDifficulty && (<div className="space-y-1"><button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>{Object.keys(curriculumTree[activeSubject!][activeYear!][activeTopic!] || {}).map((diff) => (<button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-900 rounded flex justify-between items-center text-xs border border-zinc-900 transition-colors"><div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div><span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject!][activeYear!][activeTopic!][diff].length} Qs</span></button>))}</div>)}
+              {activeSubject && activeYear && activeTopic && activeDifficulty && (<div className="space-y-1"><button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-900 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>{curriculumTree[activeSubject!][activeYear!][activeTopic!][activeDifficulty!].map((q: any, idx: number) => (<button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950/50 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}><span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span><span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span></button>))}</div>)}
             </div>
           </div>
 
@@ -298,7 +254,6 @@ export default function ClassroomPage() {
             <span className="text-zinc-400 flex items-center gap-1.5"><Wifi className={`w-3.5 h-3.5 ${isConnected ? 'text-emerald-500' : 'text-zinc-500'}`} />Signaling Server</span>
             <span className={`font-mono text-xs ${isConnected ? 'text-emerald-400' : 'text-amber-400'}`}>{isConnected ? 'ONLINE' : 'CONNECTING...'}</span>
           </div>
-
           <div className="grid grid-cols-2 gap-2">
             <button onClick={toggleAudio} className={`flex items-center justify-center gap-2 py-2 border rounded transition-colors text-xs font-medium ${isMuted ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-white' : 'bg-emerald-950 border-emerald-800 text-emerald-400'}`}>{isMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}{isMuted ? 'Unmute' : 'Muted'}</button>
             <button onClick={toggleVideo} className={`flex items-center justify-center gap-2 py-2 border rounded transition-colors text-xs font-medium ${!isVideoOn ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-white' : 'bg-blue-950 border-blue-900 text-blue-400'}`}>{!isVideoOn ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}{!isVideoOn ? 'Start Video' : 'Stop Video'}</button>
@@ -310,7 +265,7 @@ export default function ClassroomPage() {
         
         {/* HUD FLOATING LAYER */}
         {activeQuestion && (
-          <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
+          <div className="absolute top-20 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300 pointer-events-auto">
             <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
             <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
             <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
@@ -325,8 +280,10 @@ export default function ClassroomPage() {
           </div>
         )}
 
-        {/* 🚨 THE AUTONOMOUS WHITEBOARD */}
-        <WhiteboardEngine />
+        {/* SECURE CANVAS WRAPPER */}
+        <CrashCatcher>
+          <WhiteboardEngine />
+        </CrashCatcher>
         
       </main>
     </div>
