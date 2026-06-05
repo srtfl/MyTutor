@@ -3,7 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 // 🚨 THIRD-PARTY CSS IMPORTS (Guarantees Tldraw and Math render in production)
-import 'tldraw/tldraw.css';
 import 'katex/dist/katex.min.css';
 
 const geistSans = Geist({
