@@ -6,15 +6,21 @@ import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 
+// 🚨 GUARANTEED NATIVE CSS IMPORTS
+import 'katex/dist/katex.min.css';
+import 'tldraw/tldraw.css';
 
-// ---------------------------------------------------------
-// 1. DYNAMIC TLDRAW & MATH ENGINE
-// ---------------------------------------------------------
+// DYNAMIC TLDRAW IMPORT
 const Tldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
   ssr: false, 
-  loading: () => <div className="absolute inset-0 flex items-center justify-center bg-zinc-100 dark:bg-zinc-900 text-zinc-500 font-mono text-sm animate-pulse">Loading Whiteboard...</div> 
+  loading: () => <div className="w-full h-full flex items-center justify-center bg-zinc-900 text-zinc-500 font-mono text-sm animate-pulse">Loading Whiteboard...</div> 
 });
 
+const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('binding:') || id.startsWith('asset:');
+
+// ---------------------------------------------------------
+// MATH RENDERER
+// ---------------------------------------------------------
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
   const cleanContent = content.replace(/\\\\/g, '\\');
@@ -59,9 +65,8 @@ const MathRenderer = ({ content }: { content: string }) => {
   );
 };
 
-
 // ---------------------------------------------------------
-// 2. MAIN CLASSROOM PAGE
+// MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
@@ -86,9 +91,8 @@ export default function ClassroomPage() {
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
 
-  const ROOM_ID = 'global-classroom-architecture-fix'; 
+  const ROOM_ID = 'global-classroom-unified'; 
 
-  // DATABASE FETCH
   useEffect(() => {
     const fetchQuestions = async () => {
       const { data, error } = await supabase.from('questions').select('*').order('topic');
@@ -109,38 +113,31 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // SUPABASE REALTIME SYNC (With Ultra-Safe Try/Catch wrappers)
+  // SUPABASE SYNC
   useEffect(() => {
     const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false }, presence: { key: 'user' } } });
     channelRef.current = channel;
 
-    // Incoming Data
-    channel.on('broadcast', { event: 'canvas-update' }, (message) => {
-      try {
-        if (!editorRef.current || !editorRef.current.store) return;
-        const payload = message.payload;
-        if (!payload) return;
-        
-        editorRef.current.store.mergeRemoteChanges(() => {
-          try {
-            if (payload.added) {
-              const validAdded = Object.values(payload.added).filter((r: any) => r && r.id);
-              if (validAdded.length > 0) editorRef.current.store.put(validAdded);
-            }
-            if (payload.updated) {
-              const validUpdated = Object.values(payload.updated).map((rp: any) => Array.isArray(rp) ? rp[1] : rp).filter((r: any) => r && r.id);
-              if (validUpdated.length > 0) editorRef.current.store.put(validUpdated);
-            }
-            if (payload.removed) {
-              const validRemoved = Object.keys(payload.removed);
-              if (validRemoved.length > 0) editorRef.current.store.remove(validRemoved);
-            }
-          } catch (mergeError) { console.error('Tldraw merge error', mergeError); }
-        });
-      } catch (networkError) { console.error('Network sync error', networkError); }
+    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
+      if (!editorRef.current || !editorRef.current.store) return;
+      editorRef.current.store.mergeRemoteChanges(() => {
+        try {
+          if (payload.added) {
+            const valid = Object.values(payload.added).filter((r: any) => r && isShareable(r.id));
+            if (valid.length > 0) editorRef.current.store.put(valid);
+          }
+          if (payload.updated) {
+            const valid = Object.values(payload.updated).map((rp: any) => Array.isArray(rp) ? rp[1] : rp).filter((r: any) => r && isShareable(r.id));
+            if (valid.length > 0) editorRef.current.store.put(valid);
+          }
+          if (payload.removed) {
+            const valid = Object.keys(payload.removed).filter(id => isShareable(id));
+            if (valid.length > 0) editorRef.current.store.remove(valid);
+          }
+        } catch (e) { console.error('Canvas sync error', e); }
+      });
     });
     
-    // Presence Data
     channel.on('presence', { event: 'sync' }, () => setPeerCount(Object.keys(channel.presenceState()).length || 1));
     channel.subscribe((status) => setIsConnected(status === 'SUBSCRIBED'));
     
@@ -150,22 +147,20 @@ export default function ClassroomPage() {
     };
   }, [supabase]);
 
-  // Outgoing Data
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
     editor.store.listen((update: any) => {
-      if (update.source !== 'user') return; 
-      if (channelRef.current) {
-        try {
-          channelRef.current.send({
-            type: 'broadcast', event: 'canvas-update',
-            payload: { added: update.changes.added, updated: update.changes.updated, removed: update.changes.removed }
-          }).catch(() => {});
-        } catch (e) {}
-      }
-    }, { scope: 'document' }); // scope: 'document' guarantees we never sync camera/mouse bugs
+      if (update.source !== 'user' || !channelRef.current) return; 
+      try {
+        const { added, updated, removed } = update.changes;
+        const fAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) fAdded[id] = added[id]; });
+        const fUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) fUpdated[id] = updated[id]; });
+        const fRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) fRemoved[id] = removed[id]; });
+        if (Object.keys(fAdded).length === 0 && Object.keys(fUpdated).length === 0 && Object.keys(fRemoved).length === 0) return;
+        channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
+      } catch (e) {}
+    }, { scope: 'document' });
   }, []);
-
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -203,20 +198,22 @@ export default function ClassroomPage() {
   };
 
   return (
-    <>
-      {/* ---------------------------------------------------------------------------------- */}
-      {/* LAYER 1: THE CANVAS (Completely decoupled from the React Flexbox layout tree)      */}
-      {/* ---------------------------------------------------------------------------------- */}
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }}>
+    <div className="relative w-screen h-screen overflow-hidden bg-zinc-950">
+      
+      {/* ========================================== */}
+      {/* LAYER 0: THE CANVAS                        */}
+      {/* ========================================== */}
+      <div className="absolute inset-0 z-0">
         <Tldraw onMount={handleMount} />
       </div>
 
-      {/* ---------------------------------------------------------------------------------- */}
-      {/* LAYER 2: THE UI OVERLAY (pointer-events-none lets clicks pass through to canvas)   */}
-      {/* ---------------------------------------------------------------------------------- */}
-      <div className="fixed inset-0 z-10 flex pointer-events-none text-white overflow-hidden">
+      {/* ========================================== */}
+      {/* LAYER 1: THE UI OVERLAY                    */}
+      {/* pointer-events-none lets you draw through! */}
+      {/* ========================================== */}
+      <div className="absolute inset-0 z-10 pointer-events-none flex text-white">
         
-        {/* SIDEBAR (pointer-events-auto makes it clickable again) */}
+        {/* SIDEBAR */}
         <aside className="w-[340px] h-full pointer-events-auto bg-zinc-950/95 backdrop-blur-xl border-r border-zinc-800 flex flex-col justify-between p-4 shrink-0 shadow-2xl">
           <div className="space-y-4 flex-1 flex flex-col min-h-0">
             <div className="flex items-center justify-between shrink-0">
@@ -251,7 +248,6 @@ export default function ClassroomPage() {
               </div>
             </div>
 
-            {/* VIDEO STREAMS */}
             <div className="space-y-2 shrink-0">
               <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={remoteVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" /><span className="text-xs text-zinc-600 font-mono z-10">Remote Video Stream</span></div>
               <div className="relative aspect-video w-full bg-black border border-zinc-800 rounded-lg overflow-hidden flex items-center justify-center shadow-inner"><div ref={localVideoRef} className="absolute inset-0 w-full h-full object-cover z-0" />{!isVideoOn && <span className="text-xs text-zinc-600 font-mono z-10">Your Camera Off</span>}</div>
@@ -270,10 +266,10 @@ export default function ClassroomPage() {
           </div>
         </aside>
 
-        {/* HUD FLOATING LAYER */}
+        {/* HUD OVERLAY */}
         <main className="flex-1 relative">
           {activeQuestion && (
-            <div className="absolute top-6 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto pointer-events-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
+            <div className="pointer-events-auto absolute top-6 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
               <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
               <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
               <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
@@ -288,8 +284,8 @@ export default function ClassroomPage() {
             </div>
           )}
         </main>
-
       </div>
-    </>
+
+    </div>
   );
 }
