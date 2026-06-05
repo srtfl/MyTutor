@@ -5,8 +5,7 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
-import 'katex/dist/katex.min.css';
-import 'tldraw/tldraw.css';
+
 
 // ---------------------------------------------------------
 // 1. DYNAMIC TLDRAW & MATH ENGINE
