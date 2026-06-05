@@ -1,5 +1,8 @@
-@import "tailwindcss";
 @import 'tldraw/tldraw.css';
+@import 'katex/dist/katex.min.css';
+
+
+@import "tailwindcss";
 @import 'katex/dist/katex.min.css';
 
 @tailwind base;

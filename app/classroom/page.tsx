@@ -1,25 +1,81 @@
 'use client';
 
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, memo } from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
 
-// 🚨 GUARANTEED NATIVE CSS IMPORTS
-import 'katex/dist/katex.min.css';
-import 'tldraw/tldraw.css';
-
-// DYNAMIC TLDRAW IMPORT
-const Tldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
+// ---------------------------------------------------------
+// 1. ISOLATED WHITEBOARD ENGINE (Protects against 5-sec crash)
+// ---------------------------------------------------------
+const DynamicTldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
   ssr: false, 
-  loading: () => <div className="w-full h-full flex items-center justify-center bg-zinc-900 text-zinc-500 font-mono text-sm animate-pulse">Loading Whiteboard...</div> 
+  loading: () => <div className="absolute inset-0 flex items-center justify-center bg-zinc-100 text-zinc-500 font-mono text-sm animate-pulse">Loading Whiteboard...</div> 
 });
 
 const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('binding:') || id.startsWith('asset:');
+const ROOM_ID = 'global-classroom-isolated-v3'; 
+
+// React.memo guarantees this canvas NEVER re-renders when the sidebar updates!
+const WhiteboardEngine = memo(() => {
+  const [supabase] = useState(() => createClient());
+  const editorRef = useRef<any>(null);
+  const channelRef = useRef<any>(null);
+
+  useEffect(() => {
+    const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false } } });
+    channelRef.current = channel;
+
+    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
+      if (!editorRef.current || !editorRef.current.store) return;
+      editorRef.current.store.mergeRemoteChanges(() => {
+        try {
+          if (payload.added) {
+            const valid = Object.values(payload.added).filter((r: any) => r && isShareable(r.id));
+            if (valid.length > 0) editorRef.current.store.put(valid);
+          }
+          if (payload.updated) {
+            const valid = Object.values(payload.updated).map((rp: any) => Array.isArray(rp) ? rp[1] : rp).filter((r: any) => r && isShareable(r.id));
+            if (valid.length > 0) editorRef.current.store.put(valid);
+          }
+          if (payload.removed) {
+            const valid = Object.keys(payload.removed).filter(id => isShareable(id));
+            if (valid.length > 0) editorRef.current.store.remove(valid);
+          }
+        } catch (e) {}
+      });
+    });
+    
+    channel.subscribe();
+    return () => { channel.unsubscribe(); channelRef.current = null; };
+  }, [supabase]);
+
+  const handleMount = useCallback((editor: any) => {
+    editorRef.current = editor;
+    editor.store.listen((update: any) => {
+      if (update.source !== 'user' || !channelRef.current) return; 
+      try {
+        const { added, updated, removed } = update.changes;
+        const fAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) fAdded[id] = added[id]; });
+        const fUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) fUpdated[id] = updated[id]; });
+        const fRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) fRemoved[id] = removed[id]; });
+        if (Object.keys(fAdded).length === 0 && Object.keys(fUpdated).length === 0 && Object.keys(fRemoved).length === 0) return;
+        channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
+      } catch (e) {}
+    }, { scope: 'document' });
+  }, []);
+
+  return (
+    <div className="absolute inset-0 z-0">
+      <DynamicTldraw onMount={handleMount} />
+    </div>
+  );
+});
+WhiteboardEngine.displayName = "WhiteboardEngine";
 
 // ---------------------------------------------------------
-// MATH RENDERER
+// 2. MATH RENDERER
 // ---------------------------------------------------------
 const MathRenderer = ({ content }: { content: string }) => {
   if (!content) return null;
@@ -66,14 +122,12 @@ const MathRenderer = ({ content }: { content: string }) => {
 };
 
 // ---------------------------------------------------------
-// MAIN CLASSROOM PAGE
+// 3. MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
 export default function ClassroomPage() {
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
   const [peerCount, setPeerCount] = useState(1);
-  const editorRef = useRef<any>(null);
-  const channelRef = useRef<any>(null);
 
   const [curriculumTree, setCurriculumTree] = useState<any>({});
   const [activeSubject, setActiveSubject] = useState<string | null>(null);
@@ -90,8 +144,6 @@ export default function ClassroomPage() {
   const localTracksRef = useRef<{ videoTrack: any; audioTrack: any }>({ videoTrack: null, audioTrack: null });
   const remoteVideoRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLDivElement>(null);
-
-  const ROOM_ID = 'global-classroom-unified'; 
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -113,54 +165,17 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // SUPABASE SYNC
+  // Sidebar handles presence only (Won't crash the canvas!)
   useEffect(() => {
-    const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false }, presence: { key: 'user' } } });
-    channelRef.current = channel;
-
-    channel.on('broadcast', { event: 'canvas-update' }, ({ payload }) => {
-      if (!editorRef.current || !editorRef.current.store) return;
-      editorRef.current.store.mergeRemoteChanges(() => {
-        try {
-          if (payload.added) {
-            const valid = Object.values(payload.added).filter((r: any) => r && isShareable(r.id));
-            if (valid.length > 0) editorRef.current.store.put(valid);
-          }
-          if (payload.updated) {
-            const valid = Object.values(payload.updated).map((rp: any) => Array.isArray(rp) ? rp[1] : rp).filter((r: any) => r && isShareable(r.id));
-            if (valid.length > 0) editorRef.current.store.put(valid);
-          }
-          if (payload.removed) {
-            const valid = Object.keys(payload.removed).filter(id => isShareable(id));
-            if (valid.length > 0) editorRef.current.store.remove(valid);
-          }
-        } catch (e) { console.error('Canvas sync error', e); }
-      });
-    });
-    
+    const channel = supabase.channel(`presence:${ROOM_ID}`, { config: { presence: { key: 'user' } } });
     channel.on('presence', { event: 'sync' }, () => setPeerCount(Object.keys(channel.presenceState()).length || 1));
     channel.subscribe((status) => setIsConnected(status === 'SUBSCRIBED'));
     
     return () => {
-      channel.unsubscribe(); channelRef.current = null;
+      channel.unsubscribe(); 
       if (agoraClientRef.current) { localTracksRef.current.audioTrack?.close(); localTracksRef.current.videoTrack?.close(); agoraClientRef.current.leave(); }
     };
   }, [supabase]);
-
-  const handleMount = useCallback((editor: any) => {
-    editorRef.current = editor;
-    editor.store.listen((update: any) => {
-      if (update.source !== 'user' || !channelRef.current) return; 
-      try {
-        const { added, updated, removed } = update.changes;
-        const fAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) fAdded[id] = added[id]; });
-        const fUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) fUpdated[id] = updated[id]; });
-        const fRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) fRemoved[id] = removed[id]; });
-        if (Object.keys(fAdded).length === 0 && Object.keys(fUpdated).length === 0 && Object.keys(fRemoved).length === 0) return;
-        channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
-      } catch (e) {}
-    }, { scope: 'document' });
-  }, []);
 
   const initializeAgora = async () => {
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
@@ -200,17 +215,10 @@ export default function ClassroomPage() {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-950">
       
-      {/* ========================================== */}
-      {/* LAYER 0: THE CANVAS                        */}
-      {/* ========================================== */}
-      <div className="absolute inset-0 z-0">
-        <Tldraw onMount={handleMount} />
-      </div>
+      {/* LAYER 0: THE ISOLATED CANVAS ENGINE */}
+      <WhiteboardEngine />
 
-      {/* ========================================== */}
-      {/* LAYER 1: THE UI OVERLAY                    */}
-      {/* pointer-events-none lets you draw through! */}
-      {/* ========================================== */}
+      {/* LAYER 1: UI OVERLAY (pointer-events-none lets you draw underneath it) */}
       <div className="absolute inset-0 z-10 pointer-events-none flex text-white">
         
         {/* SIDEBAR */}
@@ -235,15 +243,10 @@ export default function ClassroomPage() {
               
               <div className="flex-1 overflow-y-auto p-2 space-y-1">
                 {isLoading && <div className="p-4 text-center text-xs text-zinc-500 animate-pulse">Loading Database...</div>}
-                
                 {!isLoading && !activeSubject && Object.keys(curriculumTree).map((subject) => (<button key={subject} onClick={() => setActiveSubject(subject)} className="w-full text-left p-3 hover:bg-zinc-800 rounded flex justify-between items-center text-sm border border-transparent hover:border-zinc-700 transition-colors"><span>{subject === 'Maths' ? '📐' : '⚛️'} {subject}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}
-                
                 {activeSubject && !activeYear && (<div className="space-y-1"><button onClick={() => setActiveSubject(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Subjects</button>{Object.keys(curriculumTree[activeSubject!] || {}).sort().map((year) => (<button key={year} onClick={() => setActiveYear(year)} className="w-full text-left p-3 hover:bg-zinc-800 rounded flex justify-between items-center text-sm border border-zinc-800 transition-colors"><span className="truncate pr-2 text-zinc-300">{year}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
-                
                 {activeSubject && activeYear && !activeTopic && (<div className="space-y-1"><button onClick={() => setActiveYear(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2"><ChevronLeft className="w-3 h-3" /> Back to Years</button>{Object.keys(curriculumTree[activeSubject!][activeYear!] || {}).map((topic) => (<button key={topic} onClick={() => setActiveTopic(topic)} className="w-full text-left p-3 hover:bg-zinc-800 rounded flex justify-between items-center text-xs border border-zinc-800 transition-colors"><span className="truncate pr-2 text-zinc-300">{topic}</span><ChevronRight className="w-4 h-4 text-zinc-500" /></button>))}</div>)}
-                
                 {activeSubject && activeYear && activeTopic && !activeDifficulty && (<div className="space-y-1"><button onClick={() => setActiveTopic(null)} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-800 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Topics</button>{Object.keys(curriculumTree[activeSubject!][activeYear!][activeTopic!] || {}).map((diff) => (<button key={diff} onClick={() => setActiveDifficulty(diff)} className="w-full text-left p-3 hover:bg-zinc-800 rounded flex justify-between items-center text-xs border border-zinc-800 transition-colors"><div className="flex items-center gap-2 text-zinc-300"><BarChart className="w-3 h-3 text-emerald-500" /><span>{diff}</span></div><span className="text-blue-500 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">{curriculumTree[activeSubject!][activeYear!][activeTopic!][diff].length} Qs</span></button>))}</div>)}
-                
                 {activeSubject && activeYear && activeTopic && activeDifficulty && (<div className="space-y-1"><button onClick={() => { setActiveDifficulty(null); setActiveQuestion(null); setShowSolution(false); }} className="w-full text-left p-2 text-xs text-zinc-400 hover:text-white flex items-center gap-1 mb-2 border-b border-zinc-800 pb-3"><ChevronLeft className="w-3 h-3" /> Back to Tiers</button>{curriculumTree[activeSubject!][activeYear!][activeTopic!][activeDifficulty!].map((q: any, idx: number) => (<button key={q.id} onClick={() => { setActiveQuestion(q); setShowSolution(false); }} className={`w-full text-left p-3 rounded text-xs transition-colors border ${activeQuestion?.id === q.id ? 'bg-blue-950 border-blue-900 text-white' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'}`}><span className="font-semibold text-blue-500 mr-2">Q{idx + 1}.</span><span className="line-clamp-2 mt-1"><MathRenderer content={q.question_text} /></span></button>))}</div>)}
               </div>
             </div>
@@ -269,7 +272,7 @@ export default function ClassroomPage() {
         {/* HUD OVERLAY */}
         <main className="flex-1 relative">
           {activeQuestion && (
-            <div className="pointer-events-auto absolute top-6 left-6 z-[100] w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
+            <div className="pointer-events-auto absolute top-6 left-6 w-full max-w-[420px] max-h-[80vh] overflow-y-auto bg-zinc-950/95 backdrop-blur-md border border-zinc-800 shadow-2xl rounded-xl p-5 animate-in slide-in-from-left-8 fade-in duration-300">
               <button onClick={() => { setActiveQuestion(null); setShowSolution(false); }} className="absolute top-4 right-4 p-1.5 text-zinc-500 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-all"><X className="w-5 h-5" /></button>
               <div className="flex items-center gap-2 text-emerald-400 mb-3"><BookOpen className="w-4 h-4" /><h3 className="text-xs font-bold uppercase tracking-widest">Active Workspace</h3></div>
               <div className="text-[15px] text-zinc-100 leading-relaxed pr-6 font-medium"><MathRenderer content={activeQuestion.question_text} /></div>
