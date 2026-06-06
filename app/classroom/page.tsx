@@ -267,8 +267,7 @@ export default function ClassroomPage() {
         
         {/* 🚨 BULLETPROOF CSS INJECTION 🚨 */}
         {/* These tags guarantee Next.js cannot strip the CSS in production */}
-        <link rel="stylesheet" href="https://unpkg.com/tldraw/tldraw.css" />
-        <link rel="stylesheet" href="https://unpkg.com/katex@0.16.9/dist/katex.min.css" />
+        {/* Styles are imported globally in globals.css to avoid duplicate or remote loads in production */}
 
         {/* THE CANVAS */}
         {/* Because it lives in `<main>`, there are zero transparent divs blocking your mouse! */}
