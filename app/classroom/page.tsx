@@ -71,11 +71,6 @@ const MathRenderer = ({ content }: { content: string }) => {
 // 3. MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
 export default function ClassroomPage() {
-  // Prefetch tldraw bundle early to reduce mount latency in production
-  useEffect(() => {
-    import('tldraw').catch(() => {});
-  }, []);
-
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
   const [peerCount, setPeerCount] = useState(1);
@@ -268,15 +263,10 @@ export default function ClassroomPage() {
       </aside>
 
       {/* ---------------- MAIN CANVAS ZONE ---------------- */}
-      <main className="flex-1 relative z-10 bg-zinc-100">
+      <main className="flex-1 relative bg-zinc-100">
         
-        {/* 🚨 BULLETPROOF CSS INJECTION 🚨 */}
-        {/* These tags guarantee Next.js cannot strip the CSS in production */}
-        {/* Styles are imported globally in globals.css to avoid duplicate or remote loads in production */}
-
-        {/* THE CANVAS */}
-        {/* Because it lives in `<main>`, there are zero transparent divs blocking your mouse! */}
-        <div className="absolute inset-0 z-0">
+        {/* THE CANVAS - No z-index on main to avoid stacking context blocking tldraw portals */}
+        <div className="absolute inset-0" style={{ zIndex: 0 }}>
           <Tldraw onMount={handleMount} />
         </div>
 
