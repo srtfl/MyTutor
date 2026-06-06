@@ -1,15 +1,23 @@
 'use client';
 
-import { Tldraw } from 'tldraw';
+import dynamic from 'next/dynamic';
 import 'tldraw/tldraw.css';
 
-interface WhiteboardProps {
-  onMount: (editor: any) => void;
-}
+const Tldraw = dynamic(
+  () => import('tldraw').then((m) => m.Tldraw),
+  { ssr: false }
+);
 
-export default function Whiteboard({ onMount }: WhiteboardProps) {
+export default function Whiteboard({ onMount }: any) {
   return (
-    <div className="absolute inset-0 z-0">
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 999999,
+        background: 'white',
+      }}
+    >
       <Tldraw onMount={onMount} />
     </div>
   );
