@@ -71,6 +71,11 @@ const MathRenderer = ({ content }: { content: string }) => {
 // 3. MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
 export default function ClassroomPage() {
+  // Prefetch tldraw bundle early to reduce mount latency in production
+  useEffect(() => {
+    import('tldraw').catch(() => {});
+  }, []);
+
   const [supabase] = useState(() => createClient());
   const [isConnected, setIsConnected] = useState(false);
   const [peerCount, setPeerCount] = useState(1);
