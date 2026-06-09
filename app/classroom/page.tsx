@@ -160,6 +160,24 @@ export default function ClassroomPage() {
   // Outgoing Network Data
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
+
+    // FIX: TLDraw v2 uses a 5-second debounce before setting isFocused=false when
+    // the container loses DOM focus (triggered by Next.js hydration / async re-renders).
+    // When isFocused=false, TLDraw unmounts its toolbar entirely.
+    // Solution: force isFocused=true on mount and re-apply it via the session
+    // store listener whenever TLDraw tries to set it back to false.
+    editor.updateInstanceState({ isFocused: true });
+
+    const ensureFocused = () => {
+      if (!editor.getInstanceState().isFocused) {
+        editor.updateInstanceState({ isFocused: true });
+      }
+    };
+
+    // scope:'session' covers instance state (isFocused, camera, viewport).
+    // ensureFocused is a no-op while already focused, so no performance concern.
+    const unsubFocus = editor.store.listen(ensureFocused, { scope: 'session' });
+
     editor.store.listen((update: any) => {
       if (update.source !== 'user' || !channelRef.current) return; 
       try {
@@ -172,6 +190,8 @@ export default function ClassroomPage() {
         channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
       } catch (e) {}
     }, { scope: 'document' }); // Scope ensures your mouse movements aren't sent to the network
+
+    return unsubFocus; // TLDraw calls this on editor unmount — cleans up the session listener
   }, []);
 
 
