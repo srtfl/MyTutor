@@ -2,11 +2,10 @@
 @import "tailwindcss";
 @import 'katex/dist/katex.min.css';
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* ... rest of your CSS ... */
+/* NOTE: @tailwind base/components/utilities removed — they are Tailwind v3 directives.
+   @import "tailwindcss" (v4) already includes all three layers.
+   Having both caused Cloudflare's build pipeline to inject Tailwind's base reset
+   a second time ~5s after page load, overriding TLDraw's toolbar styles. */
 
 :root {
   --background: #ffffff;

@@ -161,22 +161,26 @@ export default function ClassroomPage() {
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
 
-    // FIX: TLDraw v2 uses a 5-second debounce before setting isFocused=false when
-    // the container loses DOM focus (triggered by Next.js hydration / async re-renders).
-    // When isFocused=false, TLDraw unmounts its toolbar entirely.
-    // Solution: force isFocused=true on mount and re-apply it via the session
-    // store listener whenever TLDraw tries to set it back to false.
-    editor.updateInstanceState({ isFocused: true });
+    // Cloudflare fix: editor.focus() works at the DOM level — it calls
+    // container.focus() which fires a real focus event that TLDraw's own
+    // listener picks up and sets isFocused:true through its normal pipeline.
+    // The previous approach (updateInstanceState directly) was overridden on
+    // Cloudflare because a DOM blur event fires after hydration and resets the
+    // state we patched. Routing through the DOM event makes it stick.
+    editor.focus();
 
-    const ensureFocused = () => {
+    const keepFocused = () => {
       if (!editor.getInstanceState().isFocused) {
-        editor.updateInstanceState({ isFocused: true });
+        editor.focus();
       }
     };
 
-    // scope:'session' covers instance state (isFocused, camera, viewport).
-    // ensureFocused is a no-op while already focused, so no performance concern.
-    const unsubFocus = editor.store.listen(ensureFocused, { scope: 'session' });
+    // Re-focus any time session state changes (camera, viewport, etc.)
+    // keepFocused is a no-op when already focused — no performance concern.
+    const unsubFocus = editor.store.listen(keepFocused, { scope: 'session' });
+
+    // Re-focus when the user switches tabs and comes back
+    window.addEventListener('focus', keepFocused);
 
     editor.store.listen((update: any) => {
       if (update.source !== 'user' || !channelRef.current) return; 
@@ -189,9 +193,13 @@ export default function ClassroomPage() {
         if (Object.keys(fAdded).length === 0 && Object.keys(fUpdated).length === 0 && Object.keys(fRemoved).length === 0) return;
         channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
       } catch (e) {}
-    }, { scope: 'document' }); // Scope ensures your mouse movements aren't sent to the network
+    }, { scope: 'document' });
 
-    return unsubFocus; // TLDraw calls this on editor unmount — cleans up the session listener
+    // Clean up both listeners on editor unmount
+    return () => {
+      unsubFocus();
+      window.removeEventListener('focus', keepFocused);
+    };
   }, []);
 
 
@@ -285,9 +293,9 @@ export default function ClassroomPage() {
       {/* ---------------- MAIN CANVAS ZONE ---------------- */}
       <main className="flex-1 relative bg-zinc-100">
         
-        {/* THE CANVAS - No z-index on main to avoid stacking context blocking tldraw portals */}
+        {/* THE CANVAS - autoFocus tells TLDraw to claim focus on mount */}
         <div className="absolute inset-0" style={{ zIndex: 0 }}>
-          <Tldraw onMount={handleMount} />
+          <Tldraw autoFocus onMount={handleMount} />
         </div>
 
         {/* HUD OVERLAY */}
