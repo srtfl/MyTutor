@@ -116,6 +116,20 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
+  // CLOUDFLARE FIX — interval fallback completely outside TLDraw's event pipeline.
+  // Runs every 1.5 s (well under TLDraw's 5 s blur debounce). If isFocused has
+  // already flipped false, this snaps it back before the user notices.
+  useEffect(() => {
+    const id = setInterval(() => {
+      try {
+        if (editorRef.current && !editorRef.current.getInstanceState?.()?.isFocused) {
+          editorRef.current.getContainer?.()?.focus?.({ preventScroll: true });
+        }
+      } catch (_) {}
+    }, 1500);
+    return () => clearInterval(id);
+  }, []);
+
   // SUPABASE REALTIME SYNC 
   useEffect(() => {
     const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false }, presence: { key: 'user' } } });
@@ -161,26 +175,41 @@ export default function ClassroomPage() {
   const handleMount = useCallback((editor: any) => {
     editorRef.current = editor;
 
-    // Cloudflare fix: editor.focus() works at the DOM level — it calls
-    // container.focus() which fires a real focus event that TLDraw's own
-    // listener picks up and sets isFocused:true through its normal pipeline.
-    // The previous approach (updateInstanceState directly) was overridden on
-    // Cloudflare because a DOM blur event fires after hydration and resets the
-    // state we patched. Routing through the DOM event makes it stick.
-    editor.focus();
+    const container = editor.getContainer();
 
-    const keepFocused = () => {
-      if (!editor.getInstanceState().isFocused) {
-        editor.focus();
+    // CLOUDFLARE FIX — intercept the blur event on TLDraw's own container
+    // *before* TLDraw's handler starts its 5-second debounce timer.
+    //
+    // What happens on Cloudflare: a DOM blur fires on TLDraw's container
+    // ~0-1 s after page load (Cloudflare hydration / analytics / Rocket Loader
+    // running a script that steals focus). TLDraw catches that blur and waits
+    // exactly 5 s before setting isFocused:false and unmounting the toolbar.
+    //
+    // Previous fixes tried to react *after* isFocused flipped — but calling
+    // editor.focus() or updateInstanceState from inside TLDraw's own store
+    // listener runs synchronously mid-state-change and gets ignored or
+    // immediately overridden on Cloudflare's V8 runtime.
+    //
+    // This approach intercepts the blur at the DOM level.  When relatedTarget
+    // is null the blur was not caused by the user clicking another element
+    // (sidebar, menu, etc.) — it was a phantom lifecycle blur.  We
+    // immediately re-focus the container so TLDraw's focus handler fires and
+    // clears the debounce timer before it can complete.
+    const preventLifecycleBlur = (e: FocusEvent) => {
+      if (!e.relatedTarget) {
+        // setTimeout 0 lets the current event cycle finish, then re-focuses
+        // which fires a 'focus' event that cancels TLDraw's blur debounce.
+        setTimeout(() => container.focus({ preventScroll: true }), 0);
       }
     };
+    container.addEventListener('blur', preventLifecycleBlur, true); // capture
 
-    // Re-focus any time session state changes (camera, viewport, etc.)
-    // keepFocused is a no-op when already focused — no performance concern.
-    const unsubFocus = editor.store.listen(keepFocused, { scope: 'session' });
+    // Claim initial DOM focus
+    container.focus({ preventScroll: true });
 
-    // Re-focus when the user switches tabs and comes back
-    window.addEventListener('focus', keepFocused);
+    // Re-focus when the user returns to the browser tab
+    const onWindowFocus = () => container.focus({ preventScroll: true });
+    window.addEventListener('focus', onWindowFocus);
 
     editor.store.listen((update: any) => {
       if (update.source !== 'user' || !channelRef.current) return; 
@@ -195,10 +224,9 @@ export default function ClassroomPage() {
       } catch (e) {}
     }, { scope: 'document' });
 
-    // Clean up both listeners on editor unmount
     return () => {
-      unsubFocus();
-      window.removeEventListener('focus', keepFocused);
+      container.removeEventListener('blur', preventLifecycleBlur, true);
+      window.removeEventListener('focus', onWindowFocus);
     };
   }, []);
 
