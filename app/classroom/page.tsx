@@ -5,6 +5,9 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/utils/supabase/client';
 import { Video, VideoOff, Mic, MicOff, Wifi, Users, BookOpen, FolderTree, ChevronRight, ChevronLeft, BarChart, X, Eye, EyeOff } from 'lucide-react';
 import katex from 'katex';
+import ScientificCalculator from '@/components/Calculator';
+import MathRenderer from '@/components/MathRenderer';
+import TutoringToolbar from '@/components/TutoringToolbar';
 
 // ---------------------------------------------------------
 // 1. DYNAMIC COMPONENTS
@@ -21,75 +24,6 @@ const Whiteboard = dynamic(() => import('@/components/Whiteboard'), {
 // ---------------------------------------------------------
 // 2. MATH RENDERER
 // ---------------------------------------------------------
-const MathRenderer = ({ content }: { content: string }) => {
-  if (!content) return null;
-  const cleanContent = content.replace(/\\\\/g, '\\');
-  const parts = cleanContent.split(/(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\([\s\S]*?\\\)|\\[[\s\S]*?\\]|\\begin\{[^}]*\}[\s\S]*?\\end\{[^}]*\})/g);
-
-  return (
-    <span className="whitespace-pre-wrap">
-      {parts.map((part, index) => {
-        let isMath = false; 
-        let mathString = part; 
-        let displayMode = false;
-        
-        if (part.startsWith('$$') && part.endsWith('$$')) { 
-          isMath = true; 
-          displayMode = true; 
-          mathString = part.slice(2, -2); 
-        } 
-        else if (part.startsWith('$') && part.endsWith('$')) { 
-          isMath = true; 
-          mathString = part.slice(1, -1); 
-        } 
-        else if (part.startsWith('\\(') && part.endsWith('\\)')) { 
-          isMath = true; 
-          mathString = part.slice(2, -2); 
-        } 
-        else if (part.startsWith('\\[') && part.endsWith('\\]')) { 
-          isMath = true; 
-          displayMode = true; 
-          mathString = part.slice(2, -2); 
-        } 
-        else if (part.startsWith('\\begin{')) { 
-          isMath = true; 
-          displayMode = true; 
-          mathString = part; 
-        }
-
-        if (isMath) {
-          try {
-            let safeMath = mathString.replace(/\\begin\{array\}\{[^}]*\}/g, '\\begin{array}{c c c c c c c}');
-            safeMath = safeMath.replace(/\\-/g, '-');
-            const html = katex.renderToString(safeMath, { throwOnError: true, displayMode: displayMode, strict: false });
-            return <span key={index} dangerouslySetInnerHTML={{ __html: html }} />;
-          } catch (e) { 
-            return <span key={index} className="text-amber-500/90 font-mono text-[13px] bg-amber-500/10 px-1.5 py-0.5 rounded">{part}</span>; 
-          }
-        }
-
-        const strayRegex = /(\\[a-zA-Z]+(?:\[[^\]]*\])?(?:\{[^{}]*\})*)/g;
-        const textParts = part.split(strayRegex);
-        return (
-          <span key={index}>
-            {textParts.map((textPart, i) => {
-              if (textPart.startsWith('\\') && textPart !== '\\n' && textPart.length > 1) {
-                try {
-                  const html = katex.renderToString(textPart, { throwOnError: true, displayMode: false, strict: false });
-                  return <span key={i} dangerouslySetInnerHTML={{ __html: html }} />;
-                } catch (e) { 
-                  return <span key={i}>{textPart}</span>; 
-                }
-              }
-              return <span key={i}>{textPart.replace(/\\n/g, '\n')}</span>;
-            })}
-          </span>
-        );
-      })}
-    </span>
-  );
-};
-
 // ---------------------------------------------------------
 // 3. MAIN CLASSROOM PAGE
 // ---------------------------------------------------------
@@ -493,7 +427,8 @@ export default function ClassroomPage() {
           </div>
         )}
       </main>
-
+      <ScientificCalculator />
+      <TutoringToolbar />
     </div>
   );
 }
