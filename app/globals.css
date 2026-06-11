@@ -1,11 +1,7 @@
-@import 'tldraw/tldraw.css';
 @import "tailwindcss";
 @import 'katex/dist/katex.min.css';
 
-/* NOTE: @tailwind base/components/utilities removed — they are Tailwind v3 directives.
-   @import "tailwindcss" (v4) already includes all three layers.
-   Having both caused Cloudflare's build pipeline to inject Tailwind's base reset
-   a second time ~5s after page load, overriding TLDraw's toolbar styles. */
+/* Excalidraw CSS is loaded dynamically with the component, no need to import */
 
 :root {
   --background: #ffffff;

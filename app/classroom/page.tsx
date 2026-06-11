@@ -9,16 +9,15 @@ import katex from 'katex';
 // ---------------------------------------------------------
 // 1. DYNAMIC COMPONENTS
 // ---------------------------------------------------------
-const Tldraw = dynamic(() => import('tldraw').then(m => m.Tldraw), { 
+// Import Excalidraw (no license key required!)
+const Whiteboard = dynamic(() => import('@/components/Whiteboard'), { 
   ssr: false, 
   loading: () => (
     <div className="absolute inset-0 flex items-center justify-center bg-zinc-100 text-zinc-500 font-mono text-sm animate-pulse">
-      Downloading Whiteboard Engine...
+      Loading Whiteboard...
     </div>
   ) 
 });
-
-const isShareable = (id: string) => id.startsWith('shape:') || id.startsWith('binding:') || id.startsWith('asset:');
 
 // ---------------------------------------------------------
 // 2. MATH RENDERER
@@ -116,20 +115,6 @@ export default function ClassroomPage() {
     fetchQuestions();
   }, [supabase]);
 
-  // CLOUDFLARE FIX — interval fallback completely outside TLDraw's event pipeline.
-  // Runs every 1.5 s (well under TLDraw's 5 s blur debounce). If isFocused has
-  // already flipped false, this snaps it back before the user notices.
-  useEffect(() => {
-    const id = setInterval(() => {
-      try {
-        if (editorRef.current && !editorRef.current.getInstanceState?.()?.isFocused) {
-          editorRef.current.getContainer?.()?.focus?.({ preventScroll: true });
-        }
-      } catch (_) {}
-    }, 1500);
-    return () => clearInterval(id);
-  }, []);
-
   // SUPABASE REALTIME SYNC 
   useEffect(() => {
     const channel = supabase.channel(`canvas:${ROOM_ID}`, { config: { broadcast: { self: false }, presence: { key: 'user' } } });
@@ -171,63 +156,31 @@ export default function ClassroomPage() {
     };
   }, [supabase]);
 
-  // Outgoing Network Data
-  const handleMount = useCallback((editor: any) => {
-    editorRef.current = editor;
+  // Outgoing Network Data — Excalidraw onChange callback
+  // This is called from the Whiteboard component when canvas changes
+  const handleCanvasChange = useCallback((elements: any[], appState: any, files: any) => {
+    if (!channelRef.current) return;
+    try {
+      // Send the entire elements array and relevant app state
+      const payload = {
+        elements, // All shapes on the canvas
+        appState: {
+          zoom: appState.zoom,
+          scrollX: appState.scrollX,
+          scrollY: appState.scrollY,
+        },
+      };
+      channelRef.current.send({ 
+        type: 'broadcast', 
+        event: 'canvas-update', 
+        payload 
+      }).catch(() => {});
+    } catch (e) {}
+  }, []);
 
-    const container = editor.getContainer();
-
-    // CLOUDFLARE FIX — intercept the blur event on TLDraw's own container
-    // *before* TLDraw's handler starts its 5-second debounce timer.
-    //
-    // What happens on Cloudflare: a DOM blur fires on TLDraw's container
-    // ~0-1 s after page load (Cloudflare hydration / analytics / Rocket Loader
-    // running a script that steals focus). TLDraw catches that blur and waits
-    // exactly 5 s before setting isFocused:false and unmounting the toolbar.
-    //
-    // Previous fixes tried to react *after* isFocused flipped — but calling
-    // editor.focus() or updateInstanceState from inside TLDraw's own store
-    // listener runs synchronously mid-state-change and gets ignored or
-    // immediately overridden on Cloudflare's V8 runtime.
-    //
-    // This approach intercepts the blur at the DOM level.  When relatedTarget
-    // is null the blur was not caused by the user clicking another element
-    // (sidebar, menu, etc.) — it was a phantom lifecycle blur.  We
-    // immediately re-focus the container so TLDraw's focus handler fires and
-    // clears the debounce timer before it can complete.
-    const preventLifecycleBlur = (e: FocusEvent) => {
-      if (!e.relatedTarget) {
-        // setTimeout 0 lets the current event cycle finish, then re-focuses
-        // which fires a 'focus' event that cancels TLDraw's blur debounce.
-        setTimeout(() => container.focus({ preventScroll: true }), 0);
-      }
-    };
-    container.addEventListener('blur', preventLifecycleBlur, true); // capture
-
-    // Claim initial DOM focus
-    container.focus({ preventScroll: true });
-
-    // Re-focus when the user returns to the browser tab
-    const onWindowFocus = () => container.focus({ preventScroll: true });
-    window.addEventListener('focus', onWindowFocus);
-
-    editor.store.listen((update: any) => {
-      if (update.source !== 'user' || !channelRef.current) return; 
-      try {
-        const { added, updated, removed } = update.changes;
-        const fAdded: any = {}; Object.keys(added).forEach(id => { if (isShareable(id)) fAdded[id] = added[id]; });
-        const fUpdated: any = {}; Object.keys(updated).forEach(id => { if (isShareable(id)) fUpdated[id] = updated[id]; });
-        const fRemoved: any = {}; Object.keys(removed).forEach(id => { if (isShareable(id)) fRemoved[id] = removed[id]; });
-        
-        if (Object.keys(fAdded).length === 0 && Object.keys(fUpdated).length === 0 && Object.keys(fRemoved).length === 0) return;
-        channelRef.current.send({ type: 'broadcast', event: 'canvas-update', payload: { added: fAdded, updated: fUpdated, removed: fRemoved } }).catch(() => {});
-      } catch (e) {}
-    }, { scope: 'document' });
-
-    return () => {
-      container.removeEventListener('blur', preventLifecycleBlur, true);
-      window.removeEventListener('focus', onWindowFocus);
-    };
+  const handleMount = useCallback((excalidrawAPI: any) => {
+    editorRef.current = excalidrawAPI;
+    // Excalidraw doesn't have the focus/blur issue that TLDraw had!
   }, []);
 
 
@@ -321,9 +274,9 @@ export default function ClassroomPage() {
       {/* ---------------- MAIN CANVAS ZONE ---------------- */}
       <main className="flex-1 relative bg-zinc-100">
         
-        {/* THE CANVAS - autoFocus tells TLDraw to claim focus on mount */}
+        {/* THE CANVAS - Excalidraw whiteboard */}
         <div className="absolute inset-0" style={{ zIndex: 0 }}>
-          <Tldraw autoFocus onMount={handleMount} />
+          <Whiteboard onMount={handleMount} onChange={handleCanvasChange} />
         </div>
 
         {/* HUD OVERLAY */}
