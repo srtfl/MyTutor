@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { X, ChevronUp, ChevronDown } from 'lucide-react';
 
 export default function ScientificCalculator() {
@@ -97,7 +97,7 @@ export default function ScientificCalculator() {
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 font-sans">
+    <div className="fixed bottom-6 right-6 z-50 font-sans pointer-events-auto">
       {/* Calculator Panel */}
       <div className={`bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl overflow-hidden transition-all duration-300 ${
         isCollapsed ? 'w-14 h-14' : 'w-80'

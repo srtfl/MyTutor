@@ -1,13 +1,12 @@
 'use client';
 
 import React, { useState, useRef } from 'react';
-import { Mic, MicOff, MessageCircle, Highlighter, CircleDot, ArrowUpRight, Type, Hand, Download, RotateCcw, X } from 'lucide-react';
+import { Mic, MicOff, Highlighter, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 export default function TutoringToolbar() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
-  const [showAnnotations, setShowAnnotations] = useState(false);
-  const [selectedTool, setSelectedTool] = useState<string | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -16,7 +15,6 @@ export default function TutoringToolbar() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
-
       const chunks: BlobPart[] = [];
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
       mediaRecorder.onstop = () => {
@@ -24,19 +22,14 @@ export default function TutoringToolbar() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `tutor-note-${new Date().getTime()}.webm`;
+        a.download = `voice-note-${Date.now()}.webm`;
         a.click();
       };
-
       mediaRecorder.start();
       setIsRecording(true);
       setRecordingTime(0);
-
-      timerRef.current = setInterval(() => {
-        setRecordingTime((t) => t + 1);
-      }, 1000);
-    } catch (err) {
-      console.error('Microphone access denied:', err);
+      timerRef.current = setInterval(() => setRecordingTime((t) => t + 1), 1000);
+    } catch {
       alert('Please allow microphone access to record voice notes');
     }
   };
@@ -44,217 +37,112 @@ export default function TutoringToolbar() {
   const stopVoiceNote = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
     }
   };
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
 
   return (
-    <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-40 font-sans">
-      {/* Main Toolbar */}
-      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-full shadow-2xl p-3 flex items-center gap-3 backdrop-blur-md border border-blue-500/50">
-        
-        {/* Voice Recording */}
-        <div className="flex items-center gap-2">
-          {isRecording ? (
-            <>
-              <div className="animate-pulse bg-red-500 rounded-full w-3 h-3" />
-              <span className="text-white text-xs font-mono font-bold">{formatTime(recordingTime)}</span>
-              <button
-                onClick={stopVoiceNote}
-                className="bg-red-600 hover:bg-red-700 text-white p-2 rounded-full transition-all transform hover:scale-110"
-                title="Stop Recording"
-              >
-                <MicOff className="w-4 h-4" />
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={startVoiceNote}
-              className="bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-full transition-all transform hover:scale-110"
-              title="Record Voice Note (Ctrl+V)"
-            >
-              <Mic className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-
-        {/* Divider */}
-        <div className="h-6 w-px bg-blue-400/50" />
-
-        {/* Annotation Tools */}
-        <button
-          onClick={() => setShowAnnotations(!showAnnotations)}
-          className={`p-2 rounded-full transition-all transform hover:scale-110 ${
-            showAnnotations ? 'bg-blue-500 text-white' : 'bg-blue-400/30 text-white hover:bg-blue-500/50'
-          }`}
-          title="Show Annotation Tools"
-        >
-          <Highlighter className="w-4 h-4" />
-        </button>
-
-        {/* Divider */}
-        <div className="h-6 w-px bg-blue-400/50" />
-
-        {/* Quick Actions */}
-        <button
-          onClick={() => alert('✓ Explanation saved!')}
-          className="bg-green-600 hover:bg-green-700 text-white p-2 rounded-full transition-all transform hover:scale-110"
-          title="Save Explanation (Ctrl+S)"
-        >
-          <Download className="w-4 h-4" />
-        </button>
-
-        <button
-          onClick={() => window.location.reload()}
-          className="bg-orange-600 hover:bg-orange-700 text-white p-2 rounded-full transition-all transform hover:scale-110"
-          title="Clear & Reset (Ctrl+R)"
-        >
-          <RotateCcw className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Annotation Tools Panel */}
-      {showAnnotations && (
-        <div className="absolute top-16 left-1/2 transform -translate-x-1/2 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-4 mt-2 min-w-max">
-          <div className="text-white text-sm font-bold mb-3 flex items-center justify-between">
-            <span>✏️ Annotation Tools</span>
-            <button onClick={() => setShowAnnotations(false)} className="hover:text-red-400">
+    // FIXED: Positioned at BOTTOM-LEFT of canvas, away from Excalidraw toolbar
+    <div className="fixed bottom-6 left-[360px] z-40 font-sans">
+      
+      {/* Expanded Panel - opens UPWARD */}
+      {isExpanded && (
+        <div className="mb-2 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4 w-64">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-white text-sm font-bold">🎓 Tutor Tools</span>
+            <button onClick={() => setIsExpanded(false)} className="text-zinc-400 hover:text-white">
               <X className="w-4 h-4" />
             </button>
           </div>
 
-          <div className="space-y-2">
-            {/* Arrow Tool */}
-            <button
-              onClick={() => {
-                setSelectedTool('arrow');
-                alert('✓ Arrow tool selected - Draw on whiteboard to create arrows');
-              }}
-              className={`w-full flex items-center gap-3 p-3 rounded transition-all ${
-                selectedTool === 'arrow'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-              }`}
-              title="Draw arrows to point things out"
-            >
-              <ArrowUpRight className="w-4 h-4" />
-              <span className="text-sm">Arrow (Point Out)</span>
-            </button>
-
-            {/* Circle Tool */}
-            <button
-              onClick={() => {
-                setSelectedTool('circle');
-                alert('✓ Circle tool selected - Draw circles to highlight');
-              }}
-              className={`w-full flex items-center gap-3 p-3 rounded transition-all ${
-                selectedTool === 'circle'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-              }`}
-              title="Circle important parts"
-            >
-              <CircleDot className="w-4 h-4" />
-              <span className="text-sm">Circle (Highlight)</span>
-            </button>
-
-            {/* Highlight Tool */}
-            <button
-              onClick={() => {
-                setSelectedTool('highlight');
-                alert('✓ Highlight tool selected - Draw to highlight areas');
-              }}
-              className={`w-full flex items-center gap-3 p-3 rounded transition-all ${
-                selectedTool === 'highlight'
-                  ? 'bg-yellow-600 text-white'
-                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-              }`}
-              title="Highlight important content"
-            >
-              <Highlighter className="w-4 h-4" />
-              <span className="text-sm">Highlight</span>
-            </button>
-
-            {/* Text Tool */}
-            <button
-              onClick={() => {
-                setSelectedTool('text');
-                alert('✓ Text tool selected - Click on whiteboard to add text');
-              }}
-              className={`w-full flex items-center gap-3 p-3 rounded transition-all ${
-                selectedTool === 'text'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-              }`}
-              title="Add text annotations"
-            >
-              <Type className="w-4 h-4" />
-              <span className="text-sm">Text (Add Notes)</span>
-            </button>
-
-            {/* Pointer Tool */}
-            <button
-              onClick={() => {
-                setSelectedTool('pointer');
-                alert('✓ Pointer mode - Show students what you are explaining');
-              }}
-              className={`w-full flex items-center gap-3 p-3 rounded transition-all ${
-                selectedTool === 'pointer'
-                  ? 'bg-red-600 text-white'
-                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-              }`}
-              title="Use pointer/laser mode"
-            >
-              <Hand className="w-4 h-4" />
-              <span className="text-sm">Pointer (Laser)</span>
-            </button>
+          {/* Voice Recording */}
+          <div className="mb-4">
+            <p className="text-zinc-400 text-xs font-semibold uppercase mb-2">Voice Note</p>
+            {isRecording ? (
+              <div className="flex items-center gap-3 bg-red-950 border border-red-800 rounded-lg p-3">
+                <div className="animate-pulse bg-red-500 rounded-full w-3 h-3 shrink-0" />
+                <span className="text-red-300 text-sm font-mono font-bold">{formatTime(recordingTime)}</span>
+                <button
+                  onClick={stopVoiceNote}
+                  className="ml-auto bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs font-semibold"
+                >
+                  Stop & Save
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={startVoiceNote}
+                className="w-full flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-lg transition-all text-sm font-medium"
+              >
+                <Mic className="w-4 h-4" /> Record Explanation
+              </button>
+            )}
           </div>
 
-          {/* Quick Formulas */}
-          <div className="mt-4 pt-4 border-t border-zinc-700">
-            <p className="text-white text-xs font-bold mb-2">Quick Formulas:</p>
-            <div className="grid grid-cols-2 gap-2">
+          {/* Quick Keyboard Tips */}
+          <div>
+            <p className="text-zinc-400 text-xs font-semibold uppercase mb-2">Excalidraw Shortcuts</p>
+            <div className="grid grid-cols-2 gap-1.5 text-xs">
               {[
-                { label: 'x²', formula: 'x^2' },
-                { label: '√x', formula: '\\sqrt{x}' },
-                { label: 'α', formula: '\\alpha' },
-                { label: '∑', formula: '\\sum' },
-              ].map((item) => (
-                <button
-                  key={item.label}
-                  onClick={() => {
-                    navigator.clipboard.writeText(item.formula);
-                    alert(`✓ "${item.formula}" copied!`);
-                  }}
-                  className="bg-purple-600 hover:bg-purple-700 text-white text-xs py-2 rounded transition-all"
-                  title={`Copy ${item.formula}`}
-                >
-                  {item.label}
-                </button>
+                { key: 'P', label: 'Pen' },
+                { key: 'R', label: 'Rectangle' },
+                { key: 'O', label: 'Circle' },
+                { key: 'A', label: 'Arrow' },
+                { key: 'T', label: 'Text' },
+                { key: 'E', label: 'Eraser' },
+                { key: 'H', label: 'Hand' },
+                { key: 'Ctrl+Z', label: 'Undo' },
+              ].map(({ key, label }) => (
+                <div key={key} className="flex items-center gap-1.5 bg-zinc-800 rounded px-2 py-1">
+                  <kbd className="bg-zinc-700 text-zinc-200 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold shrink-0">
+                    {key}
+                  </kbd>
+                  <span className="text-zinc-400">{label}</span>
+                </div>
               ))}
             </div>
           </div>
         </div>
       )}
 
-      {/* Keyboard Shortcuts Info */}
-      <div className="absolute bottom-0 right-0 transform translate-y-12 translate-x-2 bg-zinc-900/95 border border-zinc-700 rounded-lg p-3 text-xs text-zinc-300 max-w-xs hidden lg:block">
-        <p className="font-bold text-white mb-2">⌨️ Keyboard Shortcuts:</p>
-        <ul className="space-y-1">
-          <li><strong>Ctrl+V</strong> - Record voice note</li>
-          <li><strong>Ctrl+S</strong> - Save explanation</li>
-          <li><strong>Ctrl+R</strong> - Clear whiteboard</li>
-          <li><strong>Tab</strong> - Open annotation tools</li>
-          <li><strong>Esc</strong> - Close panels</li>
-        </ul>
+      {/* Main Pill Button */}
+      <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full shadow-xl px-3 py-2">
+        {/* Voice button */}
+        {isRecording ? (
+          <button
+            onClick={stopVoiceNote}
+            className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-full text-xs font-semibold transition-all"
+          >
+            <div className="animate-pulse bg-white rounded-full w-2 h-2" />
+            {formatTime(recordingTime)} Stop
+          </button>
+        ) : (
+          <button
+            onClick={startVoiceNote}
+            className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-full transition-all"
+            title="Record voice note"
+          >
+            <Mic className="w-4 h-4" />
+          </button>
+        )}
+
+        <div className="h-5 w-px bg-zinc-700" />
+
+        {/* Expand/collapse */}
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex items-center gap-1.5 text-zinc-300 hover:text-white text-xs font-medium px-1 transition-all"
+          title="Tools & shortcuts"
+        >
+          <Highlighter className="w-4 h-4" />
+          <span>Tools</span>
+          {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+        </button>
       </div>
     </div>
   );
